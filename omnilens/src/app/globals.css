@@ -1,0 +1,187 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-card: var(--card-bg);
+  --color-card-border: var(--card-border);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --background: #02040a;
+  --foreground: #f0f2f5;
+  --text-muted: #64748b;
+  --card-bg: rgba(13, 17, 23, 0.6);
+  --card-border: rgba(56, 139, 253, 0.1);
+  --accent: #7c3aed;
+  --accent-foreground: #ffffff;
+  --panel-bg: rgba(1, 4, 9, 0.85);
+  --glass: rgba(255, 255, 255, 0.03);
+  --cyber-grid: rgba(56, 139, 253, 0.05);
+  --input-bg: rgba(255, 255, 255, 0.03);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --nav-bg: rgba(0, 0, 0, 0.3);
+  --skeleton: rgba(255, 255, 255, 0.05);
+}
+
+.light {
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --text-muted: #64748b;
+  --card-bg: rgba(255, 255, 255, 0.9);
+  --card-border: rgba(148, 163, 184, 0.2);
+  --accent: #6d28d9;
+  --accent-foreground: #ffffff;
+  --panel-bg: rgba(255, 255, 255, 0.95);
+  --glass: rgba(109, 40, 217, 0.04);
+  --cyber-grid: rgba(148, 163, 184, 0.08);
+  --input-bg: rgba(15, 23, 42, 0.03);
+  --input-border: rgba(15, 23, 42, 0.1);
+  --nav-bg: rgba(255, 255, 255, 0.8);
+  --skeleton: rgba(0, 0, 0, 0.05);
+}
+
+.dark {
+  --background: #02040a;
+  --foreground: #f0f2f5;
+  --text-muted: #64748b;
+  --card-bg: rgba(13, 17, 23, 0.6);
+  --card-border: rgba(56, 139, 253, 0.1);
+  --accent: #7c3aed;
+  --accent-foreground: #ffffff;
+  --panel-bg: rgba(1, 4, 9, 0.85);
+  --glass: rgba(255, 255, 255, 0.03);
+  --cyber-grid: rgba(56, 139, 253, 0.05);
+  --input-bg: rgba(255, 255, 255, 0.03);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --nav-bg: rgba(0, 0, 0, 0.3);
+  --skeleton: rgba(255, 255, 255, 0.05);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(124, 58, 237, 0.1) 0%, transparent 50%),
+    radial-gradient(circle at 100% 100%, rgba(6, 182, 212, 0.05) 0%, transparent 40%),
+    linear-gradient(var(--cyber-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--cyber-grid) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 40px 40px, 40px 40px;
+  background-attachment: fixed;
+  transition: background 0.5s ease, color 0.5s ease;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  color: var(--foreground);
+}
+
+p, span, label {
+  color: inherit;
+}
+
+textarea, input {
+  background: var(--input-bg) !important;
+  border-color: var(--input-border) !important;
+  color: var(--foreground) !important;
+}
+
+
+/* Futuristic Component Tokens */
+.cyber-glass {
+  background: var(--panel-bg);
+  backdrop-filter: blur(25px) saturate(200%);
+  border: 1px solid var(--card-border);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+}
+
+.neon-border {
+  position: relative;
+  border: 1px solid transparent;
+  background: linear-gradient(var(--card-bg), var(--card-bg)) padding-box,
+    linear-gradient(45deg, var(--neon-purple), var(--neon-cyan)) border-box;
+}
+
+.data-stream {
+  position: relative;
+  overflow: hidden;
+}
+
+.data-stream::after {
+  content: '';
+  position: absolute;
+  top: -100%;
+  left: 0;
+  width: 100%;
+  height: 40%;
+  background: linear-gradient(to bottom, transparent, rgba(6, 182, 212, 0.05), transparent);
+  animation: stream 6s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes stream {
+  0% {
+    transform: translateY(0);
+  }
+
+  100% {
+    transform: translateY(500%);
+  }
+}
+
+/* Holographic refinement */
+.holographic-card {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.holographic-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.05) 45%,
+      rgba(255, 255, 255, 0.1) 50%,
+      rgba(255, 255, 255, 0.05) 55%,
+      transparent 100%);
+  background-size: 200% 200%;
+  background-position: 0% 0%;
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.holographic-card:hover::before {
+  opacity: 1;
+  animation: holo-shimmer 2s infinite linear;
+}
+
+@keyframes holo-shimmer {
+  0% {
+    background-position: -200% -200%;
+  }
+
+  100% {
+    background-position: 200% 200%;
+  }
+}
+
+/* AI Thinking States */
+.ai-pulse {
+  animation: pulse-glow 2s infinite alternate;
+}
+
+@keyframes pulse-glow {
+  0% {
+    box-shadow: 0 0 5px rgba(124, 58, 237, 0.2);
+  }
+
+  100% {
+    box-shadow: 0 0 20px rgba(124, 58, 237, 0.6);
+  }
+}

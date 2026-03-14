@@ -1,0 +1,7 @@
+{
+    "python.defaultInterpreterPath": "c:\\Projects\\OmniLens Pro\\omnilens-ml\\venv\\Scripts\\python.exe",
+    "python.analysis.extraPaths": [
+        "c:\\Projects\\OmniLens Pro\\omnilens-ml",
+        "c:\\Projects\\OmniLens Pro\\omnilens-ml\\venv\\Lib\\site-packages"
+    ]
+}

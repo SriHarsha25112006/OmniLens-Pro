@@ -1,0 +1,16 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+ml_engine/data/session_*.json
+ml_engine/cache/
+ms-playwright/
+.env.local
+.env.production
+.env

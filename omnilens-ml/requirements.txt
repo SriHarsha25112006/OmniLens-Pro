@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+playwright
+playwright-stealth
+transformers
+torch
+sentence-transformers
+scikit-learn
+aiohttp
+beautifulsoup4
+python-multipart
