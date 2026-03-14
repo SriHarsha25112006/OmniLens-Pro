@@ -1,0 +1,51 @@
+# OmniLens Pro: ML Models & AI Architecture
+
+This document describes the Machine Learning models used in the OmniLens Pro project, their specific roles, and how they impact the application's behavior.
+
+## 1. Intent Classification & Parsing
+OmniLens uses a three-tier pipeline to understand user prompts.
+
+### Tier 2: Zero-shot NLI Classifier
+*   **Model**: `facebook/bart-large-mnli` (BART Large)
+*   **Function**: Classifies any user query as either a "SCENARIO" or a "PRODUCT" with high accuracy (~97%).
+*   **Impact**: This is the "brain" that decides how to handle your request. 
+    *   If you say "I'm going skiing", BART identifies it as a **SCENARIO** and triggers list generation.
+    *   If you say "Show me headphones", it identifies it as a **PRODUCT** and moves directly to search.
+
+### Tier 3: Sequence-to-Sequence Generation
+*   **Model**: `google/flan-t5-small` (Flan-T5)
+*   **Function**: Advanced natural language generation.
+*   **Impact**: It handles "Dynamic Extrapolation". 
+    *   **In Scenario Mode**: If you provide a vague prompt (e.g., "Skiing trip"), Flan-T5 generates a list of exactly 10 physical items you might need (Ski goggles, thermal wear, etc.).
+    *   **In Product Mode**: It helps generate relevant variants or search terms to ensure the best results are found.
+
+### Tier 2 Fallback: Semantic Encoding
+*   **Model**: `Sentence Transformers` (dynamically loaded)
+*   **Function**: Converts text into numerical vectors (embeddings).
+*   **Impact**: Used for deep semantic matching and as a fallback for the intent classifier when specialized local matching is required.
+
+---
+
+## 2. Product Evaluation & Scoring
+After finding products online, the system uses AI to rank them.
+
+### Sentiment Analysis
+*   **Model**: `cardiffnlp/twitter-roberta-base-sentiment-latest` (RoBERTa)
+*   **Function**: Analyzes the text of product reviews retrieved during scraping.
+*   **Impact**: Calculates a **Sentiment Score (0.0 – 1.0)**.
+    *   If reviews are overwhelmingly positive, the product's rank increases.
+    *   If reviews mention issues (e.g., "broken", "terrible"), the RoBERTa model detects the negative tone and lowers the product's visibility in your list.
+
+---
+
+## 3. Heuristic Systems (Non-ML)
+While not "Models" in the traditional sense, these logic engines complement the AI:
+*   **Taxonomy Engine (Tier 1)**: A curated keyword-matching system for 100% accuracy on common queries.
+*   **Scoring Engine**: Combines the Sentiment Score (AI) with star ratings, review volume, brand authority (e.g., Sony/Apple), and price competitiveness to give you the final "Best Value" ranking.
+
+---
+
+## Summary of Benefits
+*   **Accuracy**: The system doesn't just keywords-match; it understands the *intent* behind your words.
+*   **Personalization**: It can generate complex shopping lists for any situation without being programmed for that specific scenario.
+*   **Reliability**: By analyzing thousands of words of review data in seconds using RoBERTa, it protects you from "low-quality" products that might have high manipulated ratings.
