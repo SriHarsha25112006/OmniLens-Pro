@@ -70,7 +70,7 @@ SCENARIO_TAXONOMY = {
     ],
 
     # ── TRAVEL / ADVENTURE ───────────────────────────────────────────────────
-    "skiing|ski trip|snowboarding|ski resort": [
+    "skiing|ski trip|skitrip|snowboarding|ski resort": [
         "Ski Jacket", "Ski Pants", "Ski Boots",
         "Ski Helmet", "Ski Goggles", "Thermal Base Layer",
         "Ski Gloves", "Ski Socks", "Hand Warmers",
@@ -82,7 +82,7 @@ SCENARIO_TAXONOMY = {
         "Water Purifier Portable", "First Aid Kit", "Thermal Jacket",
         "Multi-tool Knife", "Hydration Bladder", "Trail Gaiters",
     ],
-    "beach vacation|beach trip|sea holiday": [
+    "beach vacation|beach trip|beachtrip|sea holiday": [
         "Reef-safe Sunscreen", "Rash Guard", "Beach Sandals",
         "Underwater Camera", "Beach Bag Waterproof", "Snorkeling Kit",
         "Quick-dry Towel", "Portable Bluetooth Speaker", "Water Shoes",

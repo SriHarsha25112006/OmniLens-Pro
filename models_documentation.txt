@@ -1,51 +1,127 @@
-# OmniLens Pro: ML Models & AI Architecture
+================================================================================
+OmniLens Pro: ML Models & AI Architecture Guide
+================================================================================
 
-This document describes the Machine Learning models used in the OmniLens Pro project, their specific roles, and how they impact the application's behavior.
+This document describes the Machine Learning (ML) models and Heuristic systems
+used in OmniLens Pro to power autonomous AI shopping analysis.
 
-## 1. Intent Classification & Parsing
-OmniLens uses a three-tier pipeline to understand user prompts.
+--------------------------------------------------------------------------------
+1. INTENT CLASSIFICATION & PARSING (THREE-TIER PIPELINE)
+--------------------------------------------------------------------------------
 
-### Tier 2: Zero-shot NLI Classifier
-*   **Model**: `facebook/bart-large-mnli` (BART Large)
-*   **Function**: Classifies any user query as either a "SCENARIO" or a "PRODUCT" with high accuracy (~97%).
-*   **Impact**: This is the "brain" that decides how to handle your request. 
-    *   If you say "I'm going skiing", BART identifies it as a **SCENARIO** and triggers list generation.
-    *   If you say "Show me headphones", it identifies it as a **PRODUCT** and moves directly to search.
+OmniLens uses a modular, fallback-tolerant pipeline to parse user queries and
+decide whether to generate a checklist (SCENARIO) or search direct models (PRODUCT).
 
-### Tier 3: Sequence-to-Sequence Generation
-*   **Model**: `google/flan-t5-small` (Flan-T5)
-*   **Function**: Advanced natural language generation.
-*   **Impact**: It handles "Dynamic Extrapolation". 
-    *   **In Scenario Mode**: If you provide a vague prompt (e.g., "Skiing trip"), Flan-T5 generates a list of exactly 10 physical items you might need (Ski goggles, thermal wear, etc.).
-    *   **In Product Mode**: It helps generate relevant variants or search terms to ensure the best results are found.
+--- [ Tier 1: Taxonomy Keyword Match (Heuristic) ] ---
 
-### Tier 2 Fallback: Semantic Encoding
-*   **Model**: `Sentence Transformers` (dynamically loaded)
-*   **Function**: Converts text into numerical vectors (embeddings).
-*   **Impact**: Used for deep semantic matching and as a fallback for the intent classifier when specialized local matching is required.
+  * Method : High-speed lookup against compiled regex patterns and taxonomy.
+  * Role   : Instantly matches high-confidence direct goals without waiting for 
+             Neural Network inference.
+  
+  * EXAMPLE:
+    - User Query : "I'm setting up a home theater"
+    - Match      : Rule matches keywords "setup" or "home theater".
+    - Workflow   : Returns a curated list immediately: 
+                   ["4K Projector", "Surround Sound Speaker", "Screen", ...]
 
----
+--- [ Tier 2: Intent Classification & Fallback ] ---
 
-## 2. Product Evaluation & Scoring
-After finding products online, the system uses AI to rank them.
+  If Tier 1 fails, the system runs sentence classification to predict intent.
 
-### Sentiment Analysis
-*   **Model**: `cardiffnlp/twitter-roberta-base-sentiment-latest` (RoBERTa)
-*   **Function**: Analyzes the text of product reviews retrieved during scraping.
-*   **Impact**: Calculates a **Sentiment Score (0.0 – 1.0)**.
-    *   If reviews are overwhelmingly positive, the product's rank increases.
-    *   If reviews mention issues (e.g., "broken", "terrible"), the RoBERTa model detects the negative tone and lowers the product's visibility in your list.
+  A. Fine-Tuned Logistic Regression
+  ---------------------------------
+  * Model : SentenceTransformer (embeddings) + LogisticRegression.
+  * Role  : Fast, local classifier to predict Scenario vs Product.
+  
+  * EXAMPLE:
+    - User Query : "Planning a weekend hike to the mountains"
+    - Output     : SCENARIO
 
----
+  B. Zero-Shot NLI Fallback
+  -------------------------
+  * Model : facebook/bart-large-mnli
+  * Role  : Backstops accuracy by measuring similarity to broad prompts.
+  * Candidate Labels:
+    1. "a situation or goal that requires multiple different products" (SCENARIO)
+    2. "a specific product or product category to search for" (PRODUCT)
+  
+  * EXAMPLE:
+    - User Query : "Suggest noise cancelling headphones"
+    - Match      : Label 2 (PRODUCT) @ ~98%
+    - Workflow   : Route to Product Variant generation.
 
-## 3. Heuristic Systems (Non-ML)
-While not "Models" in the traditional sense, these logic engines complement the AI:
-*   **Taxonomy Engine (Tier 1)**: A curated keyword-matching system for 100% accuracy on common queries.
-*   **Scoring Engine**: Combines the Sentiment Score (AI) with star ratings, review volume, brand authority (e.g., Sony/Apple), and price competitiveness to give you the final "Best Value" ranking.
+--- [ Tier 3: Sequence-to-Sequence Generation ] ---
 
----
+  Once bounded to a path, the system runs Natural Language Generation to 
+  generate node categories using few-shot prompting.
 
-## Summary of Benefits
-*   **Accuracy**: The system doesn't just keywords-match; it understands the *intent* behind your words.
-*   **Personalization**: It can generate complex shopping lists for any situation without being programmed for that specific scenario.
-*   **Reliability**: By analyzing thousands of words of review data in seconds using RoBERTa, it protects you from "low-quality" products that might have high manipulated ratings.
+  A. Scenario List Generation (Dynamic Extrapolation)
+  -------------------------------------------------
+  * Model : google/flan-t5-small
+  
+  * EXAMPLE:
+    - User Input : "I'm starting a home gym"
+    - Output     : [Adjustable Dumbbells, Thick Yoga Mat, Resistance Bands, 
+                    Pull-up Bar, Workout Bench]
+    - Workflow   : Routes 10 unique items to background search APIs.
+
+  B. Product Variant Generation
+  --------------------------
+  * Model : google/flan-t5-small
+  
+  * EXAMPLE:
+    - User Input : "iPhone"
+    - Output     : [iPhone 15 Pro, iPhone 15, iPhone 14 Plus, iPhone 13 Mini]
+    - Workflow   : Dispatches concurrent scrapes for each model.
+
+
+--------------------------------------------------------------------------------
+2. PRODUCT EVALUATION & SCORING (MULTI-SIGNAL RATING)
+--------------------------------------------------------------------------------
+
+After scraping candidates, each product passes through an evaluation node.
+
+--- [ Sentiment Analysis ] ---
+
+  * Model : cardiffnlp/twitter-roberta-base-sentiment-latest
+  * Role  : Reads retrieved user reviews per item concurrently and assesses tone.
+  
+  * EXAMPLE:
+    - Review Input : "The ANC is fantastic but the head clamp is too tight"
+    - Probabilities: Positive: 40%, Neutral: 25%, Negative: 35%
+    - Output       : Normalizes to average Sentiment Score (e.g., 65%). High 
+                     reviews lift score; bad reviews depress ranking.
+
+--- [ Composite Weighted Scoring ] ---
+
+  The Scoring Engine aggregates multiple signals to rank items (0-100% in UI).
+
+  SIGNAL              WEIGHT   LOGIC & EXAMPLE
+  ------------------  ------   -------------------------------------------------
+  Semantic Match      20%      Fuzzy comparison of title vs search query.
+                               Ex: Query "AirPods Pro", Title "AirPods 2"
+  
+  Brand Trust         15%      Multiplier for canonical brands (Apple, Sony).
+                               Ex: Sony gets higher bias than generic brands.
+  
+  Star Rating         20%      Normalized 5-star metric.
+                               Ex: 4.5 Stars / 5.0 -> 90% factor.
+  
+  Sentiment           25%      RoBERTa Positive probability on loaded reviews.
+                               Ex: 65% Positive aggregate rating.
+  
+  Sales Volume        10%      Log-scaled density mapping to safe sample bias.
+                               Ex: 10,000 ratings scale higher than 5 ratings.
+  
+  Price Value         10%      Incentivizes presence of discount factors.
+                               Ex: Discount factor min(1.0, 0.5 + discount/100).
+
+
+--------------------------------------------------------------------------------
+3. HEURISTIC FALLBACKS
+--------------------------------------------------------------------------------
+
+  1. Typo-Correction: Maps loose typos before model inference using dense 
+     KNOWN_ENTITIES sets (e.g., "aple" -> "Apple").
+  2. Reliability Score: Multiplier metric in UI alerting users if an item is 
+     ranked highly on low review density setup.

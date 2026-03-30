@@ -68,7 +68,8 @@ def main():
         kill_proc(backend_process)
         
         print("[*] OmniLens Pro safely closed.")
-        sys.exit(0)
+        import os
+        os._exit(0)
 
     # Register cleanup handlers
     atexit.register(cleanup)

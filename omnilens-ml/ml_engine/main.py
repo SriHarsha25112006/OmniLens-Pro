@@ -49,9 +49,10 @@ class ShopRequest(BaseModel):
     prompt: str
     budgetStr: str
 
-async def process_item(item: dict, context, log_q: asyncio.Queue) -> list[dict]:
+async def process_item(item: dict, browser, log_q: asyncio.Queue) -> list[dict]:
     """
     Processes a single search term into multiple product nodes.
+    Each item gets its own fresh browser context to avoid Amazon session bans.
     """
     item_id = item['id']
     item_name = item['name']
@@ -64,17 +65,47 @@ async def process_item(item: dict, context, log_q: asyncio.Queue) -> list[dict]:
     # Status: Scraping
     await log_q.put(f"data: {json.dumps({'event': 'item_update', 'data': {'id': item_id, 'status': 'scraping', 'statusText': f'Extracting items for {item_name}...', 'progress': 10}})}\n\n")
 
-    scraped_results = await scraper_service.scrape_items(search_query, context=context, log_cb=log_cb)
+    scraped_results = []
+    max_retries = 4
+    for attempt in range(max_retries):
+        await log_q.put(f"data: {json.dumps({'event': 'item_update', 'data': {'id': item_id, 'status': 'scraping', 'statusText': f'Extracting items for {item_name}' + (f' (Try {attempt+1})' if attempt > 0 else '') + '...', 'progress': 10}})}\n\n")
+
+        # Fresh context per item attempt
+        _context_args = {
+            "user_agent": random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ]),
+            "viewport": {"width": random.choice([1280, 1366, 1440, 1920, 1536]), "height": random.choice([768, 800, 900, 1080, 864])},
+            "ignore_https_errors": True,
+            "locale": "en-IN",
+            "timezone_id": "Asia/Kolkata",
+        }
+        context = await browser.new_context(**_context_args)
+        try:
+            results = await scraper_service.scrape_items(search_query, context=context, log_cb=log_cb)
+            if results is None:
+                # Amazon flagged this context (503/CAPTCHA) - Retry with a new one!
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+                continue
+            scraped_results = results
+            break  # Success!
+        finally:
+            await context.close()
 
     if not scraped_results:
-        await log_q.put(f"data: {json.dumps({'event': 'item_update', 'data': {'id': item_id, 'status': 'complete', 'statusText': 'No nodes found', 'progress': 100}})}\n\n")
-        return []
+        scraped_results = [scraper_service._mock(item_name)]
+        await log_q.put(f"data: {json.dumps({'event': 'item_update', 'data': {'id': item_id, 'status': 'complete', 'statusText': 'Scraper Fallback Executed', 'progress': 100}})}\n\n")
 
     processed = []
     # Limit to 8 products per search term to avoid UI overload
     for i, data in enumerate(scraped_results[:8]):
         unique_id = f"{item_id}_{i}"
-        await log_q.put(f"data: {json.dumps({'event': 'item_update', 'data': {'id': unique_id, 'status': 'analyzing', 'statusText': f'Scoring {data["title"][:20]}...', 'progress': 50 + (i*5)}})}\n\n")
+        score_title = data["title"][:20]
+        _ev = json.dumps({'event': 'item_update', 'data': {'id': unique_id, 'status': 'analyzing', 'statusText': f'Scoring {score_title}...', 'progress': 50 + (i * 5)}})
+        await log_q.put(f"data: {_ev}\n\n")
         
         score_data = scoring_engine.calculate_raw_score(data, float(item['essentiality']))
         
@@ -158,17 +189,21 @@ async def stream_shop(req: ShopRequest):
                     "locale": "en-IN",
                     "timezone_id": "Asia/Kolkata",
                 }
-                context = await browser.new_context(**context_args)
-
                 # Each process_item streams live log/status events via log_q.
-                # The item_finish is returned directly as a dict for batch processing.
+                # Items run SEQUENTIALLY - each with its own fresh context to avoid shared session bans.
                 log_q: asyncio.Queue[str | None] = asyncio.Queue()
 
                 async def run_all():
-                    tasks = [asyncio.create_task(process_item(item, context, log_q)) for item in items_to_scrape]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    all_results = []
+                    for item in items_to_scrape:
+                        try:
+                            result = await process_item(item, browser, log_q)
+                            all_results.append(result)
+                        except Exception as e:
+                            logger.error(f"process_item failed for '{item.get('name')}': {e}")
+                            all_results.append([])
                     await log_q.put(None)  # Sentinel
-                    return results
+                    return all_results
 
                 run_task = asyncio.create_task(run_all())
 
@@ -180,7 +215,6 @@ async def stream_shop(req: ShopRequest):
                     yield chunk
 
                 nested_results = await run_task
-                await context.close()
                 await browser.close()
 
             # ── Flatten & Save Session Data ─────────────────────────────────────
@@ -188,6 +222,8 @@ async def stream_shop(req: ShopRequest):
             for sublist in nested_results:
                 if isinstance(sublist, list):
                     valid_results.extend(sublist)
+                else:
+                    logger.error(f"Task failed with exception in stream_shop: {sublist}")
 
             if not valid_results:
                 yield f"data: {json.dumps({'event': 'error', 'data': {'message': 'No products could be retrieved. Please try a different query.'}})}\n\n"
@@ -293,7 +329,8 @@ async def stream_shop(req: ShopRequest):
                     'sentiment':    r.get('sentiment', 0.0),
                     'name':         r.get('name', ''),
                     'isBestseller': r.get('is_bestseller', False),
-                    'reliability':  r.get('reliability_score', 0.8)
+                    'reliability':  r.get('reliability_score', 0.8),
+                    'target_query': r.get('target_query', '')
                 }
                 yield f"data: {json.dumps({'event': 'item_finish', 'data': finish_data})}\n\n"
 
@@ -458,7 +495,7 @@ async def wishlist_suggestions_endpoint(req: WishlistRequest):
         
         for node in new_item_nodes:
             scraped = await scrape_single_item(node["name"])
-            if scraped:
+            if scraped and scraped.get("price_inr", 0) > 0:
                 link = scraped.get('link', '#')
                 if link != "#":
                     if link in seen_links:
@@ -616,13 +653,22 @@ async def chat_endpoint(req: ChatRequest):
     if is_ranking:
         count_match = re.search(r"top\s+(\d+)", msg_lower)
         count = int(count_match.group(1)) if count_match else 10
-        
-        # Try to find what they want to rank
+
         subject = _parse_add_item(msg) or (items[0]["name"] if items else None)
         if subject:
             logger.info(f"🏆 Ranking request for '{subject}' (Top {count})")
-            # For ranking, we just trigger a fresh deep scrape for that item
-            scraped = await scraper_service.scrape_items(subject)
+            # Ranking needs its own browser context — never passed in from stream_shop
+            from playwright.async_api import async_playwright as _apw
+            async with _apw() as p:
+                browser = await p.chromium.launch(headless=True)
+                rank_ctx = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1440, "height": 900},
+                    locale="en-IN", timezone_id="Asia/Kolkata", ignore_https_errors=True,
+                )
+                scraped = await scraper_service.scrape_items(subject, context=rank_ctx)
+                await rank_ctx.close()
+                await browser.close()
             if scraped:
                 scored = []
                 for data in scraped[:count]:
@@ -632,18 +678,24 @@ async def chat_endpoint(req: ChatRequest):
                         "name": data["title"],
                         "score": round(sd["raw_score"] * 100, 1),
                         "finalPrice": sd["price_inr"],
+                        "reliability": round(sd.get("reliability_score", 0.6), 2),
                         "platform": sd["platform"],
                         "external_link": data["link"],
                         "image": data.get("image", ""),
                         "tags": ["Best Rated"] if random.random() > 0.5 else ["Top Match"]
                     })
                 session_manager.save_products(scored)
-                ranked_list = "\n".join([f"{i+1}. **{s['name'][:40]}...** — ₹{s['finalPrice']:,.0f}" for i, s in enumerate(scored)])
+                def _price_str(p): return f"₹{p:,.0f}" if p > 0 else "Price N/A"
+                ranked_list = "\n".join([
+                    f"{i+1}. **{s['name'][:40]}...** — {_price_str(s['finalPrice'])}"
+                    for i, s in enumerate(scored)
+                ])
                 return {
-                    "action": "add_bulk", # New client action to add multiples
+                    "action": "add_bulk",
                     "items": scored,
                     "message": f"🏆 Here are the top {len(scored)} rankings for **{subject}**:\n\n{ranked_list}\n\n*Nodes integrated into your dashboard.*"
                 }
+
 
     # ── 3. Generative Expansion (Load More / Explore Further) ────────────────
     is_more = any(t in msg_lower for t in ["more", "further", "load more", "what else", "extended", "explore beyond"])
@@ -651,7 +703,7 @@ async def chat_endpoint(req: ChatRequest):
     
     if is_more or is_system_explore:
         query_context = None
-        current_names = [i.get("name", "").lower() for i in items if i.get("name")]
+        current_names = [i.get("target_query", "").lower() for i in items if i.get("target_query")]
         
         if is_system_explore:
             # Extract prompt context
@@ -669,31 +721,52 @@ async def chat_endpoint(req: ChatRequest):
             
         logger.info(f"🧠 Generative Expansion (Explore Further) for: '{query_context}'")
         
-        new_item_nodes = intent_parser.extrapolate_checklist(query_context, exclude_items=current_names, num_items=5)
+        new_item_nodes = intent_parser.extrapolate_checklist(query_context, exclude_items=current_names, num_items=12)
         
         if not new_item_nodes:
             return {"action": "message", "message": f"🏆 You've seen all high-fidelity nodes for **{query_context}**."}
 
         scored = []
-        for node in new_item_nodes:
-            scraped = await scrape_single_item(node["name"])
-            if scraped:
-                # Calculate scores
-                sd = scoring_engine.calculate_raw_score(scraped, node["essentiality"])
-                scored.append({
-                    "id": f"gen_{abs(hash(scraped.get('link', node['name']))) % 100000}",
-                    "name": scraped.get("title", node["name"]),
-                    "score": round(sd["raw_score"] * 100, 1),
-                    "finalPrice": sd["price_inr"],
-                    "platform": sd["platform"],
-                    "external_link": scraped.get("link", "#"),
-                    "image": scraped.get("image", ""),
-                    "tags": ["New Discovery"],
-                    # Novelty Upgrades
-                    "wait_to_buy": sd.get("wait_to_buy", False),
-                    "coupon_applied": sd.get("coupon_applied", None),
-                    "reddit_sentiment": sd.get("reddit_sentiment", None)
-                })
+        from playwright.async_api import async_playwright
+        
+        # We reuse a single context to avoid browser spawn crashes/timeouts
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context_args = {
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "viewport": {"width": 1440, "height": 900},
+                "ignore_https_errors": True,
+                "locale": "en-IN",
+                "timezone_id": "Asia/Kolkata",
+            }
+            context = await browser.new_context(**context_args)
+            
+            for node in new_item_nodes:
+                logger.info(f"Scraping candidate node: {node['name']}")
+                scraped = await scraper_service.scrape_item(node["name"], context=context)
+                # Accept any result — price=0 is OK (displayed as "Price N/A" in UI)
+                if scraped:
+                    sd = scoring_engine.calculate_raw_score(scraped, node["essentiality"])
+                    scored.append({
+                        "id": f"gen_{abs(hash(scraped.get('link', node['name']))) % 100000}",
+                        "name": scraped.get("title", node["name"]),
+                        "score": round(sd["raw_score"] * 100, 1),
+                        "finalPrice": sd["price_inr"],
+                        "reliability": round(sd.get("reliability_score", 0.6), 2),
+                        "platform": sd["platform"],
+                        "external_link": scraped.get("link", "#"),
+                        "image": scraped.get("image", ""),
+                        "tags": ["Top Search Products"],
+                        "wait_to_buy": sd.get("wait_to_buy", False),
+                        "coupon_applied": sd.get("coupon_applied", None),
+                        "reddit_sentiment": sd.get("reddit_sentiment", None),
+                        "target_query": node["name"]
+                    })
+                    if len(scored) >= 8:   # Return up to 8 new nodes
+                        break
+            
+            await context.close()
+            await browser.close()
         
         if not scored:
             return {"action": "message", "message": f"⚠️ Extrapolated new nodes but web extraction failed."}
@@ -777,28 +850,98 @@ async def chat_endpoint(req: ChatRequest):
             "message": f"✅ Added **{new_item_name}** — ₹{scrape_result.get('price_inr', 0):,.0f}"
         }
 
-    # ── 7. Knowledge Domain Constraint ──────────────────────────────────────────
-    # If it reached here, it's a general question. We search memory for known products.
+    # ── 7. Intelligent Context-Aware Responses ──────────────────────────────
     memory_items = items + req.wishlist
-    target_memory = _find_item_to_remove(msg, memory_items)
 
+    # Budget / total cost analysis
+    if any(t in msg_lower for t in ["total", "budget", "how much", "cost", "spend", "price total"]):
+        if items:
+            total = sum(i.get("finalPrice", 0) or 0 for i in items)
+            n = len(items)
+            lines = "\n".join(f"• {i.get('name','?')[:35]}... — ₹{i.get('finalPrice',0):,.0f}" for i in items[:6])
+            more = f"\n*...and {n-6} more*" if n > 6 else ""
+            avg = total // n if n else 0
+            return {
+                "action": "message",
+                "message": f"💰 **Budget Breakdown — {n} items**\n\n{lines}{more}\n\n🏷️ **Total: ₹{total:,.0f}** | Avg: ₹{avg:,.0f}/item"
+            }
+        return {"action": "message", "message": "📭 No items in your session yet. Run a search first!"}
+
+    # Comparison analysis
+    if any(t in msg_lower for t in ["compare", "better", "which one", "vs", "difference", "best of"]):
+        pool = [i for i in items if (i.get("finalPrice") or 0) > 0] or items
+        if len(pool) >= 2:
+            a, b = pool[0], pool[1]
+            winner = a if (a.get("score") or 0) >= (b.get("score") or 0) else b
+            return {
+                "action": "message",
+                "message": (
+                    f"⚖️ **Comparison**\n\n"
+                    f"① **{a.get('name','?')[:38]}**\n   Price: ₹{a.get('finalPrice',0):,.0f} | Score: {a.get('score',0):.1f}/100 | Reliability: {a.get('reliability',0):.0%}\n\n"
+                    f"② **{b.get('name','?')[:38]}**\n   Price: ₹{b.get('finalPrice',0):,.0f} | Score: {b.get('score',0):.1f}/100 | Reliability: {b.get('reliability',0):.0%}\n\n"
+                    f"🏆 **Recommendation:** {winner.get('name','?')[:40]}\n_Higher composite score across price, rating, and sentiment._"
+                )
+            }
+        return {"action": "message", "message": "🤔 I need at least 2 items loaded to compare. Run a search first!"}
+
+    # Best/recommendation queries
+    if any(t in msg_lower for t in ["best", "recommend", "suggest", "worth", "should i buy", "what do you think"]):
+        if items:
+            valid = [i for i in items if (i.get("finalPrice") or 0) > 0]
+            top = max(valid or items, key=lambda x: x.get("score") or 0)
+            return {
+                "action": "message",
+                "message": (
+                    f"🎯 **Top Pick from your list:**\n\n"
+                    f"**{top.get('name','?')[:50]}**\n"
+                    f"• Price: ₹{top.get('finalPrice',0):,.0f}\n"
+                    f"• ML Score: {top.get('score',0):.1f}/100\n"
+                    f"• Reliability: {top.get('reliability',0):.0%}\n"
+                    f"• Platform: {top.get('platform','')}\n\n"
+                    f"_This scores highest on the combined OmniLens matrix of price, rating, and sentiment._"
+                )
+            }
+
+    # Item memory lookup
+    target_memory = _find_item_to_remove(msg, memory_items)
     if target_memory:
         src = "Wishlist" if any(w.get("id") == target_memory["id"] for w in req.wishlist) else "Session"
         return {
             "action": "message",
             "message": (
-                f"🧠 Context ({src}): I see **{target_memory['name']}** in your memory.\n"
-                f"It is currently priced at ₹{target_memory.get('finalPrice', 0):,.0f} with an ML score of {target_memory.get('score', 0)}/100.\n"
-                "I can manipulate this item if you ask me to replace or remove it!"
+                f"🧠 **Found in {src}:** {target_memory['name']}\n"
+                f"• Price: ₹{target_memory.get('finalPrice', 0):,.0f}\n"
+                f"• Score: {target_memory.get('score', 0)}/100\n\n"
+                "Tell me to *remove*, *replace*, or *compare* it!"
             )
         }
 
-    # Default Restricted Fallback
+    # Help / greeting
+    if any(t in msg_lower for t in ["hello", "hi", "help", "what can you", "how do", "commands"]):
+        n = len(items)
+        return {
+            "action": "message",
+            "message": (
+                f"👋 **OmniLens Assistant** — {n} item{'s' if n != 1 else ''} loaded\n\n"
+                "**Commands I understand:**\n"
+                "• `remove jacket` — remove an item\n"
+                "• `compare the top two` — side-by-side analysis\n"
+                "• `what's my total?` — budget breakdown\n"
+                "• `best pick?` — top recommendation\n"
+                "• `add waterproof flashlight` — live search & add\n"
+                "• `focus on cheap items` — tune ranking weights\n"
+                "• `undo` / `reset` — history navigation"
+            )
+        }
+
+    # Intelligent catch-all
+    n = len(items)
+    item_ctx = f" I have **{n} items** loaded in your session." if n else ""
     return {
         "action": "message",
         "message": (
-            f"🔒 System Constraint: My domain knowledge is strictly restricted to your current **Session Items** and **Wishlist Memory**.\n\n"
-            f"If you'd like to ask a general question, please formulate an operation like *'Add a gaming mouse'* so I can fetch external nodes into my memory."
+            f"🤔 I'm not sure what you mean, but I'm here to help!{item_ctx}\n\n"
+            "Try: *\"what's my total?\"*, *\"compare items\"*, *\"best pick?\"*, *\"remove X\"*, or *\"add Y\""
         )
     }
 

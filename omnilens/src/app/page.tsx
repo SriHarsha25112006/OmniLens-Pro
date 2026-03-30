@@ -10,7 +10,7 @@ import WeightTuner from '@/components/WeightTuner';
 
 export default function Home() {
   const [prompt, setPrompt] = useState('I want to go for a skiing trip, help me shop for the necessary items.');
-  const [budgetStr, setBudgetStr] = useState('₹ 50000');
+  const [budgetStr, setBudgetStr] = useState('50000');
   const [noBudget, setNoBudget] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
   const [queryType, setQueryType] = useState<string | null>(null);
@@ -242,7 +242,7 @@ export default function Home() {
     try {
       const res = await fetch(`${getApiUrl()}/api/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: '[SYSTEM] EXTRAPOLATE_MORE: ' + prompt, items: items.map((i) => ({ id: i.id, name: i.name, finalPrice: i.finalPrice })) }),
+        body: JSON.stringify({ message: '[SYSTEM] EXTRAPOLATE_MORE: ' + prompt, items: items.map((i) => ({ id: i.id, name: i.name, target_query: i.target_query, finalPrice: i.finalPrice })) }),
       });
       const data = await res.json();
       if (data.action === 'add_bulk' && data.items) {
@@ -272,6 +272,7 @@ export default function Home() {
       if (data.action === 'remove' && data.remove_id) { pushHistory(); setStoreItems(cur.filter((i) => i.id !== data.remove_id)); }
       else if (data.action === 'replace') { pushHistory(); const ni: ProductItem = { ...data.new_item, status: 'complete', progress: 100, category: 'Components' }; if (data.remove_id) setStoreItems(cur.map((i) => i.id === data.remove_id ? ni : i)); else setStoreItems([...cur, ni]); }
       else if (data.action === 'add' && data.new_item) { pushHistory(); setStoreItems([...cur, { ...data.new_item, status: 'complete', progress: 100, category: 'Components' }]); }
+      else if (data.action === 'add_bulk' && data.items) { pushHistory(); const withDefaults = data.items.map((it: any) => ({ ...it, status: 'complete', progress: 100, category: 'Components' })); setStoreItems([...cur, ...withDefaults]); }
       addChatMessage({ id: Date.now().toString(), role: 'ai', content: data.message || '✅ *Instruction executed.*' });
     } catch {
       addChatMessage({ id: Date.now().toString(), role: 'ai', content: '⚠️ Uplink failed.' });
@@ -320,8 +321,16 @@ export default function Home() {
             </div>
           </div>
         ) : (
-          <div className="relative h-48 w-full bg-slate-100 dark:bg-slate-900 flex flex-col items-center justify-center border-b border-white/5">
-            <span className="text-xs font-mono text-slate-500">IMAGE U/A</span>
+          <div className="relative h-48 w-full overflow-hidden border-b border-white/5 flex items-center justify-center"
+            style={{ background: `linear-gradient(135deg, hsl(${Math.abs((item.name?.charCodeAt(0) ?? 65) * 7) % 360}, 35%, 10%) 0%, hsl(${Math.abs((item.name?.charCodeAt(0) ?? 65) * 7 + 140) % 360}, 30%, 7%) 100%)` }}>
+            <div className="flex flex-col items-center gap-2 opacity-60">
+              <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center backdrop-blur-sm">
+                <span className="text-xl font-black text-white/40">
+                  {(item.name || 'NA').split(' ').slice(0, 2).map((w: string) => w[0] ?? '').join('').toUpperCase()}
+                </span>
+              </div>
+              <span className="text-[9px] font-mono text-white/25 tracking-widest uppercase">Loading Image...</span>
+            </div>
           </div>
         )}
 
@@ -352,7 +361,15 @@ export default function Home() {
               <div className="flex flex-col">
                 <span className="text-[10px] text-slate-500 uppercase tracking-widest font-mono">Market Price</span>
                 <div className="flex items-center gap-2">
-                  <span className="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">₹{(item.finalPrice || 0).toLocaleString()}</span>
+                  {(item.finalPrice || 0) > 0 ? (
+                    <span className="text-xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
+                      ₹{(item.finalPrice || 0).toLocaleString()}
+                    </span>
+                  ) : (
+                    <span className="text-sm font-bold text-amber-500/70 border border-amber-500/20 px-2 py-0.5 rounded-md bg-amber-500/5">
+                      Price N/A
+                    </span>
+                  )}
                   {item.wait_to_buy !== undefined && (
                     <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider ${item.wait_to_buy ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'}`}>
                       {item.wait_to_buy ? 'Wait' : 'Buy Now'}
@@ -470,9 +487,12 @@ export default function Home() {
                 <div className="mt-3 space-y-2">
                   <label className="block text-[10px] font-mono tracking-widest text-slate-500 uppercase">Budget Constraint</label>
                   <div className="flex items-center gap-3">
-                    <input type="text" value={noBudget ? 'Unlimited' : budgetStr} onChange={(e) => setBudgetStr(e.target.value)}
-                      disabled={noBudget || isProcessing}
-                      className="flex-grow bg-white/[0.04] border border-white/[0.1] rounded-xl px-4 py-2.5 text-sm text-slate-200 placeholder-slate-600 outline-none focus:border-purple-500/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" />
+                    <div className={`flex-grow flex items-center bg-white/[0.04] border border-white/[0.1] rounded-xl px-4 py-2.5 transition-colors focus-within:border-purple-500/50 ${noBudget ? 'opacity-40 cursor-not-allowed' : ''}`}>
+                      <span className="text-slate-400 font-bold select-none mr-2">{noBudget ? '' : '₹'}</span>
+                      <input type="text" value={noBudget ? 'Unlimited' : budgetStr} onChange={(e) => setBudgetStr(e.target.value.replace(/^₹\s*/, ''))}
+                        disabled={noBudget || isProcessing}
+                        className="bg-transparent w-full text-sm text-slate-200 placeholder-slate-600 outline-none disabled:cursor-not-allowed" />
+                    </div>
                     <label className="flex items-center gap-2 cursor-pointer flex-shrink-0">
                       <div className={`w-9 h-5 rounded-full transition-colors duration-300 relative ${noBudget ? 'bg-purple-500' : 'bg-slate-700'}`} onClick={() => setNoBudget((v) => !v)}>
                         <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-300 ${noBudget ? 'translate-x-4' : 'translate-x-0.5'}`} />
@@ -577,13 +597,22 @@ export default function Home() {
                     <div className="relative z-10 p-5 pt-3 border-t border-slate-200 dark:border-white/5 bg-slate-100/50 dark:bg-black/20">
                       <div className="flex gap-3 items-end bg-white dark:bg-slate-900 border border-slate-300 dark:border-white/10 rounded-2xl p-2 shadow-sm focus-within:border-purple-500/50 focus-within:ring-2 focus-within:ring-purple-500/20 transition-all">
                         <textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
-                          placeholder="Type 'remove X', 'undo', or ask a question..." rows={1} disabled={isChatLoading}
+                          placeholder="Ask: 'total?', 'best pick?', 'compare', 'remove X'..." rows={1} disabled={isChatLoading}
                           className="flex-grow bg-transparent px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 outline-none resize-none max-h-32 min-h-[40px] scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-slate-800"
                           style={{ minHeight: '40px' }} />
                         <button onClick={sendChatMessage} disabled={isChatLoading || !chatInput.trim()}
                           className="flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center bg-slate-900 dark:bg-gradient-to-br dark:from-purple-600 dark:to-cyan-600 hover:bg-slate-800 dark:hover:from-purple-500 dark:hover:to-cyan-500 disabled:opacity-30 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white shadow-md transition-all">
                           <Send className="w-4 h-4 ml-0.5" />
                         </button>
+                      </div>
+                      {/* Quick-reply chips */}
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {["What's my total?", "Best pick?", "Compare items", "Undo"].map((chip) => (
+                          <button key={chip} onClick={() => setChatInput(chip)}
+                            className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-slate-500 dark:text-slate-400 hover:bg-purple-50 dark:hover:bg-purple-500/10 hover:border-purple-300 dark:hover:border-purple-500/30 hover:text-purple-600 dark:hover:text-purple-300 transition-all">
+                            {chip}
+                          </button>
+                        ))}
                       </div>
                     </div>
                     </motion.div>

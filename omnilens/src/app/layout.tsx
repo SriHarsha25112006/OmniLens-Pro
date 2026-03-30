@@ -16,7 +16,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased selection:bg-purple-500/30`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased selection:bg-purple-500/30`} suppressHydrationWarning>
         <ThemeProvider>
           <div className="fixed inset-0 -z-50 overflow-hidden pointer-events-none transition-colors duration-500 bg-background">
             <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] rounded-full bg-purple-900/10 blur-[120px] mix-blend-screen opacity-50 dark:opacity-100" />

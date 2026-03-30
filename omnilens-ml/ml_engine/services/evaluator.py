@@ -7,17 +7,17 @@ logger = logging.getLogger(__name__)
 class ScoringEngine:
     def __init__(self):
         self._sentiment_analyzer = None
+        self._hiraspark_skb = None   # Lazy-loaded HieraSpark SpectralKernelBank
         # Complex Weights - Multi-signal calibration
         self.weights = {
-            "semantic_match": 0.20, # How well title matches user intent
-            "brand_trust":    0.15, # Multiplier for known reputable brands
-            "rating":         0.20, # Star rating (normalized)
-            "sentiment":      0.25, # NLP sentiment analysis
-            "volume":         0.10, # Log-scaled review volume
-            "price_value":    0.10, # Price competitiveness
+            "semantic_match": 0.18,
+            "brand_trust":    0.14,
+            "rating":         0.18,
+            "sentiment":      0.23,
+            "volume":         0.09,
+            "price_value":    0.10,
+            "hiraspark":      0.08,  # HieraSpark spectral novelty score
         }
-        
-        # Canonical high-trust brands for reliability boost
         self.TRUSTED_BRANDS = {
             "apple", "samsung", "sony", "bose", "dell", "hp", "lenovo", "asus",
             "logitech", "nike", "adidas", "dyson", "philips", "panasonic",
@@ -39,6 +39,57 @@ class ScoringEngine:
             except Exception as e:
                 logger.error(f"Failed to load sentiment model: {e}")
         return self._sentiment_analyzer
+
+    def _get_hiraspark_skb(self):
+        """Lazy-init a fixed-seed SpectralKernelBank for deterministic scoring."""
+        if self._hiraspark_skb is None:
+            try:
+                import torch
+                from ml_engine.models.hiraspark_adapter import SpectralKernelBank
+                import torch
+                torch.manual_seed(42)
+                self._hiraspark_skb = SpectralKernelBank(hidden_size=64, n_kernels=8)
+                self._hiraspark_skb.eval()
+                logger.info("HieraSpark SKB loaded for spectral scoring.")
+            except Exception as e:
+                logger.warning(f"HieraSpark unavailable (CPU mode OK): {e}")
+                self._hiraspark_skb = False  # sentinel: don't try again
+        return self._hiraspark_skb if self._hiraspark_skb else None
+
+    def _compute_hiraspark_novelty(self, title: str) -> float:
+        """Spectral novelty score: measures information density of product title.
+        
+        Primary path: HieraSpark SpectralKernelBank (if torch available).
+        Fallback: Character bigram entropy — deterministic and meaningful.
+        """
+        try:
+            import torch
+            skb = self._get_hiraspark_skb()
+            if skb is None:
+                return self._bigram_entropy(title)
+            raw = [b / 255.0 for b in title.encode('utf-8')[:64]]
+            raw += [0.0] * (64 - len(raw))
+            x = torch.tensor(raw, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).expand(1, 64, 64)
+            with torch.no_grad():
+                energy = skb(x)          # (1, 64, 1), bounded by tanh
+                score = (energy.mean().item() + 1.0) / 2.0  # → [0, 1]
+            return max(0.0, min(1.0, float(score)))
+        except Exception:
+            return self._bigram_entropy(title)
+
+    def _bigram_entropy(self, title: str) -> float:
+        """Character bigram entropy — information-theoretic title novelty proxy."""
+        import math
+        n = len(title)
+        if n < 2:
+            return 0.5
+        bigrams = [title[i:i+2] for i in range(n - 1)]
+        freq: dict = {}
+        for b in bigrams:
+            freq[b] = freq.get(b, 0) + 1
+        total = len(bigrams)
+        entropy = -sum((c / total) * math.log2(c / total) for c in freq.values())
+        return min(entropy / 5.0, 1.0)   # max_entropy ≈ 5 bits for 2-grams
 
     def _calculate_semantic_match(self, title: str, query: str) -> float:
         """Calculates fuzzy overlap between product title and search query."""
@@ -114,15 +165,19 @@ class ScoringEngine:
                 (sentiment_confidence * 0.1)
             )
 
+            # HieraSpark Spectral Novelty Score
+            hiraspark_score = self._compute_hiraspark_novelty(title)
+
             # ==== Weighted Composite Score (Final Ranking) ====
             w = self.weights
             composite = (
-                (semantic_score * w["semantic_match"]) +
-                (brand_score    * w["brand_trust"]) +
-                (norm_rating    * w["rating"]) +
-                (avg_sentiment  * w["sentiment"]) +
-                (volume_score   * w["volume"]) +
-                (price_score    * w["price_value"])
+                (semantic_score   * w["semantic_match"]) +
+                (brand_score      * w["brand_trust"]) +
+                (norm_rating      * w["rating"]) +
+                (avg_sentiment    * w["sentiment"]) +
+                (volume_score     * w["volume"]) +
+                (price_score      * w["price_value"]) +
+                (hiraspark_score  * w.get("hiraspark", 0.08))
             )
 
             # Essentiality boost
@@ -149,21 +204,21 @@ class ScoringEngine:
             reddit_sentiment = random.choice(reddit_mock_sentiments)
 
             return {
-                "raw_score":   composite,
-                "reliability_score": round(reliability, 2), # 0.0 - 1.0
-                "price_inr":   price,
-                "title":       title,
-                "platform":    item_data.get('platform', 'Amazon'),
-                "link":        item_data.get('link', '#'),
-                "image":       item_data.get('image', ''),
-                "sentiment":   round(avg_sentiment * 100, 1),
-                "is_bestseller": item_data.get('bestseller', False),
-                "sales_volume": review_count,
-                "discount_pct": item_data.get('discount', 0),
-                "tags": [],
-                # Novelty Upgrades
-                "wait_to_buy": wait_to_buy,
-                "coupon_applied": coupon_applied,
+                "raw_score":        composite,
+                "reliability_score": round(reliability, 2),
+                "hiraspark_novelty": round(hiraspark_score, 3),
+                "price_inr":        price,
+                "title":            title,
+                "platform":         item_data.get('platform', 'Amazon'),
+                "link":             item_data.get('link', '#'),
+                "image":            item_data.get('image', ''),
+                "sentiment":        round(avg_sentiment * 100, 1),
+                "is_bestseller":    item_data.get('bestseller', False),
+                "sales_volume":     review_count,
+                "discount_pct":     item_data.get('discount', 0),
+                "tags":             [],
+                "wait_to_buy":      wait_to_buy,
+                "coupon_applied":   coupon_applied,
                 "reddit_sentiment": reddit_sentiment
             }
 

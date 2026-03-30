@@ -94,7 +94,7 @@ class IntentParser:
             # clean punctuation for lookup
             clean_word = re.sub(r'[^a-zA-Z0-9]', '', word.lower())
             if len(clean_word) > 3 and clean_word not in self.KNOWN_ENTITIES:
-                matches = difflib.get_close_matches(clean_word, self.KNOWN_ENTITIES, n=1, cutoff=0.75)
+                matches = difflib.get_close_matches(clean_word, self.KNOWN_ENTITIES, n=1, cutoff=0.8)
                 if matches:
                     # Restore original capitalization/punctuation format if needed (simplified here)
                     corrected.append(matches[0])
