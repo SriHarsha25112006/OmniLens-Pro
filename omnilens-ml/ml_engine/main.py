@@ -946,7 +946,156 @@ async def chat_endpoint(req: ChatRequest):
     }
 
 
+
+# ─── Explore Further: Dedicated Infinite Discovery Engine ─────────────────────
+
+class ExploreRequest(BaseModel):
+    query: str                    # original user query / mission prompt
+    seen_ids: list[str] = []      # all product IDs already shown (dedup guard)
+    seen_names: list[str] = []    # product names already shown (semantic dedup)
+    limit: int = 2                # how many new products to return (default 2)
+
+@app.post("/api/explore_further")
+async def explore_further(req: ExploreRequest):
+    """
+    Dedicated Explore Further endpoint.
+    - Tracks seen_ids/seen_names to guarantee no duplicate products.
+    - Uses RLHF-tuned global weights for candidate ranking.
+    - Returns exactly `limit` (default 2) new products per click.
+    - Fine-tunes candidates by scoring with scoring_engine (same pipeline as main search).
+    """
+    query = req.query.strip()
+    seen_ids_set = set(req.seen_ids)
+    seen_names_lower = {n.lower().strip() for n in req.seen_names}
+
+    if not query:
+        return {"items": [], "message": "No query provided."}
+
+    logger.info(f"[Explore Further] query='{query}' | seen={len(seen_ids_set)} ids | limit={req.limit}")
+
+    # ── Step 1: Generate candidate product names via intent parser ──────────
+    # Pass seen_names so intent_parser can exclude already-shown categories
+    candidate_nodes = intent_parser.extrapolate_checklist(
+        query,
+        exclude_items=list(seen_names_lower),
+        num_items=max(req.limit * 6, 12)   # generate enough candidates to find `limit` unique ones
+    )
+
+    if not candidate_nodes:
+        logger.warning("[Explore Further] No candidate nodes generated.")
+        return {"items": [], "message": "No more products to explore for this query."}
+
+    # ── Step 2: Rank candidates using current RLHF weights ─────────────────
+    # Sort by essentiality score (proxy for query relevance) — highest first
+    candidate_nodes.sort(key=lambda n: float(n.get("essentiality", 0.5)), reverse=True)
+
+    # ── Step 3: Scrape & score candidates until we have `limit` results ─────
+    scored = []
+    from playwright.async_api import async_playwright as _apw
+
+    async with _apw() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=random.choice([
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            ]),
+            viewport={"width": 1440, "height": 900},
+            ignore_https_errors=True,
+            locale="en-IN",
+            timezone_id="Asia/Kolkata",
+        )
+
+        for node in candidate_nodes:
+            if len(scored) >= req.limit:
+                break
+
+            node_name = node.get("name", "")
+            node_name_lower = node_name.lower().strip()
+
+            # Skip if name is semantically too close to something already shown
+            if any(
+                node_name_lower in seen_name or seen_name in node_name_lower
+                for seen_name in seen_names_lower
+            ):
+                logger.info(f"[Explore Further] Skipping '{node_name}' — semantic duplicate.")
+                continue
+
+            logger.info(f"[Explore Further] Scraping candidate: '{node_name}'")
+            try:
+                scraped = await scraper_service.scrape_item(node_name, context=context, log_cb=lambda m: None)
+                if not scraped:
+                    continue
+
+                # Check if the returned product title clashes with seen items
+                title_lower = scraped.get("title", "").lower().strip()
+                if any(
+                    title_lower in seen_name or seen_name in title_lower
+                    for seen_name in seen_names_lower
+                ):
+                    logger.info(f"[Explore Further] Skipping scraped result '{scraped.get('title')}' — title duplicate.")
+                    continue
+
+                product_id = f"explore_{abs(hash(scraped.get('link', node_name))) % 999999}"
+
+                # Skip if id already seen
+                if product_id in seen_ids_set:
+                    continue
+
+                sd = scoring_engine.calculate_raw_score(scraped, float(node.get("essentiality", 0.7)))
+
+                scored.append({
+                    "id":              product_id,
+                    "name":            scraped.get("title", node_name),
+                    "status":          "complete",
+                    "progress":        100,
+                    "category":        "Explored Discovery",
+                    "target_query":    node_name,
+
+                    # ── All score signals ──────────────────────────────────
+                    "score":           round(sd.get("raw_score", 0.5) * 100, 1),
+                    "finalPrice":      sd.get("price_inr", 0),
+                    "sentiment":       round(sd.get("sentiment", 0.0), 1),
+                    "reliability":     round(sd.get("reliability_score", 0.6), 2),
+                    "brand_score":     round(sd.get("brand_score", 0.5) * 100, 1),
+                    "discount_pct":    round(sd.get("discount_pct", 0.0), 1),
+                    "sales_volume":    sd.get("sales_volume", 0),
+                    "wait_to_buy":     sd.get("wait_to_buy", False),
+                    "coupon_applied":  sd.get("coupon_applied", None),
+                    "reddit_sentiment": sd.get("reddit_sentiment", None),
+
+                    # ── Presentation fields ────────────────────────────────
+                    "platform":        sd.get("platform", "Amazon India"),
+                    "image":           scraped.get("image", ""),
+                    "external_link":   scraped.get("link", "#"),
+                    "tags":            ["Explored Discovery"] + (sd.get("tags") or []),
+                    "is_explored":     True,
+                })
+                seen_ids_set.add(product_id)
+
+            except Exception as err:
+                logger.error(f"[Explore Further] Scrape error for '{node_name}': {err}")
+                continue
+
+        await context.close()
+        await browser.close()
+
+    # ── Step 4: Normalize scores across the returned batch ─────────────────
+    if scored:
+        scored = scoring_engine.normalize_scores(scored)
+        scored.sort(key=lambda r: r.get("raw_score", 0), reverse=True)
+        session_manager.save_products(scored)
+
+    logger.info(f"[Explore Further] Returning {len(scored)} products.")
+    return {
+        "items": scored,
+        "count": len(scored),
+        "message": f"Found {len(scored)} new discovery node{'s' if len(scored) != 1 else ''} for '{query}'."
+    }
+
+
 if __name__ == "__main__":
+
     import uvicorn
     if sys.platform == 'win32':
         import uvicorn.loops.auto

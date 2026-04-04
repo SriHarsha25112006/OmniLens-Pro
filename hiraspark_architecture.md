@@ -419,6 +419,45 @@ All components initialize to identity or near-zero — RSG gate=0 → identity; 
 
 ---
 
+## 9. OmniLens Integration: ExploreEngine (v2)
+
+HieraSpark's scoring pipeline powers the **ExploreEngine**, a live production feature in OmniLens Pro.
+
+### Architecture
+
+```
+POST /api/explore_further
+  │
+  ├── ExploreRequest: { query, seen_ids, seen_names, limit=2 }
+  │
+  ├── intent_parser.extrapolate_checklist(query, exclude=seen_names)
+  │       → Generates candidate product names outside current session
+  │
+  ├── Rank by essentiality score (RLHF-tuned weights from global_weights)
+  │
+  ├── Playwright scraper (fresh browser context per call)
+  │       → Semantic dedup: skips titles overlapping seen_names
+  │
+  ├── scoring_engine.calculate_raw_score()
+  │       → All signals: score, sentiment, reliability, discount_pct,
+  │         brand_score, sales_volume, wait_to_buy
+  │
+  └── Returns exactly `limit=2` new scored products (never seen before)
+```
+
+### Fine-tuning Hook
+The ExploreEngine uses `_global_weights` (the RLHF weight vector updated by user interactions via `/api/rl_feedback`). When a user adds a high-sentiment product to cart, `sentiment` weight increases → future Explore Further results are re-ranked to favor sentiment. This is the **online fine-tuning loop** of the recommendation model.
+
+### Key Properties
+- **Stateless dedup**: `seen_ids` and `seen_names` passed by client — no server-side session storage needed
+- **Infinite discovery**: Each click sends updated `seen_ids`, guaranteeing no repeats across unlimited clicks  
+- **Same card template**: Returns identical field schema as main search — same `renderProductCard` renders them
+- **Score transparency**: All 4 score signals (Match, Sentiment, Reliability, Discount) visible on every card
+
+
+
+---
+
 ## 9. File Manifest
 
 | File | Purpose |

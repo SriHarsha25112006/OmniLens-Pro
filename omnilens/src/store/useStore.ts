@@ -19,9 +19,15 @@ export type ProductItem = {
     external_link: string;
     tags?: string[];
     sentiment?: number;
+    reliability?: number;
+    brand_score?: number;
+    discount_pct?: number;
+    sales_volume?: number;
     wait_to_buy?: boolean;
     coupon_applied?: string;
     reddit_sentiment?: string;
+    target_query?: string;
+    is_explored?: boolean;
 };
 
 export type ChatMessage = {
@@ -63,6 +69,11 @@ type OmniStore = {
     clearLogs: () => void;
     setStatusMessage: (m: string) => void;
     setIsProcessing: (v: boolean) => void;
+
+    // ── Explore Further ───────────────────────────────────────────────
+    exploredItems: ProductItem[];
+    addExploredItems: (items: ProductItem[]) => void;
+    clearExploredItems: () => void;
 
     // ── Cart ──────────────────────────────────────────────────────────
     cartItems: ProductItem[];
@@ -120,7 +131,7 @@ export const useStore = create<OmniStore>()(
                 set((s) => ({ items: prev, itemsHistory: s.itemsHistory.slice(0, -1) }));
             },
             resetItems: () => {
-                set((s) => ({ items: s.allItems, itemsHistory: [] }));
+                set((s) => ({ items: s.allItems, itemsHistory: [], exploredItems: [] }));
             },
             setFallback: (f) => set({ fallback: f }),
             addLog: (msg) =>
@@ -134,6 +145,12 @@ export const useStore = create<OmniStore>()(
             clearLogs: () => set({ logs: [] }),
             setStatusMessage: (m) => set({ statusMessage: m }),
             setIsProcessing: (v) => set({ isProcessing: v }),
+
+            // ── Explore Further ───────────────────────────────────────────
+            exploredItems: [],
+            addExploredItems: (newItems) =>
+                set((s) => ({ exploredItems: [...s.exploredItems, ...newItems] })),
+            clearExploredItems: () => set({ exploredItems: [] }),
 
             // ── Cart ──────────────────────────────────────────────────────
             cartItems: [],

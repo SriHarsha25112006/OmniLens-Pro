@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, FormEvent, useEffect, useRef } from 'react';
+import { useState, FormEvent, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getApiUrl } from '@/lib/config';
-import { Search, Loader2, Aperture, AlertCircle, ShoppingBag, Terminal, Activity, Zap, CheckCircle2, MessageSquare, X, Send, Bot, Heart, ShoppingCart, SlidersHorizontal, Tag } from 'lucide-react';
+import { Search, Loader2, Aperture, AlertCircle, ShoppingBag, Terminal, Activity, Zap, CheckCircle2, MessageSquare, X, Send, Bot, Heart, ShoppingCart, SlidersHorizontal, Tag, Compass, Star, TrendingUp, BarChart2, Percent, ChevronDown } from 'lucide-react';
 import { useStore, type ProductItem } from '@/store/useStore';
 import Link from 'next/link';
 import WeightTuner from '@/components/WeightTuner';
@@ -50,17 +50,24 @@ export default function Home() {
   const addToCart = useStore((s) => s.addToCart);
   const toggleWishlist = useStore((s) => s.toggleWishlist);
   const addChatMessage = useStore((s) => s.addChatMessage);
+  const exploredItems = useStore((s) => s.exploredItems);
+  const addExploredItems = useStore((s) => s.addExploredItems);
+  const clearExploredItems = useStore((s) => s.clearExploredItems);
 
   // ── Local UI state ────────────────────────────────────────────────
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [tunerOpen, setTunerOpen] = useState(false);
+  const [isExploring, setIsExploring] = useState(false);
+  const [exploreCount, setExploreCount] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const exploreEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
+  useEffect(() => { if (exploredItems.length > 0) exploreEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [exploredItems]);
 
   // ── Main search handler ───────────────────────────────────────────
   const handleSubmit = async (e: FormEvent) => {
@@ -71,6 +78,8 @@ export default function Home() {
     setFallback(null);
     setQueryType(null);
     clearLogs();
+    clearExploredItems();
+    setExploreCount(0);
     setStatusMessage('Uplinking to ML Engine: Parsing Intent Vector...');
     const sessionPrefix = `s${Date.now()}_`;
 
@@ -236,25 +245,42 @@ export default function Home() {
   };
 
   const handleExploreFurther = async () => {
-    if (isProcessing) return;
-    setIsProcessing(true);
-    setStatusMessage('Extrapolating deeper market dimensions...');
+    if (isExploring || isProcessing) return;
+    setIsExploring(true);
+
+    // Collect all already-shown product IDs and names (main + previously explored)
+    const allShown = [...items, ...exploredItems];
+    const seenIds = allShown.map(i => i.id);
+    const seenNames = allShown
+      .map(i => i.name || i.target_query || '')
+      .filter(Boolean);
+
     try {
-      const res = await fetch(`${getApiUrl()}/api/chat`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: '[SYSTEM] EXTRAPOLATE_MORE: ' + prompt, items: items.map((i) => ({ id: i.id, name: i.name, target_query: i.target_query, finalPrice: i.finalPrice })) }),
+      const res = await fetch(`${getApiUrl()}/api/explore_further`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: prompt,
+          seen_ids: seenIds,
+          seen_names: seenNames,
+          limit: 2,
+        }),
       });
       const data = await res.json();
-      if (data.action === 'add_bulk' && data.items) {
-        pushHistory();
-        const bulkItems = data.items.map((it: any) => ({ ...it, status: 'complete', progress: 100, category: 'Components' }));
-        setStoreItems([...items, ...bulkItems]);
+      if (data.items && data.items.length > 0) {
+        const newItems: ProductItem[] = data.items.map((it: any) => ({
+          ...it,
+          status: 'complete' as const,
+          progress: 100,
+          category: it.category || 'Explored Discovery',
+        }));
+        addExploredItems(newItems);
+        setExploreCount(c => c + newItems.length);
       }
     } catch {
-      setStatusMessage('⚠️ Extrapolation failed.');
+      // Silent fail — user can click again
     } finally {
-      setIsProcessing(false);
-      setStatusMessage('System Online');
+      setIsExploring(false);
     }
   };
 
@@ -285,7 +311,7 @@ export default function Home() {
       <div className="absolute -inset-0.5 bg-gradient-to-br from-purple-500/20 to-cyan-500/0 rounded-2xl blur opacity-0 group-hover:opacity-100 transition duration-500" />
       <motion.div
         whileHover={{ rotateY: idx % 2 === 0 ? 5 : -5, rotateX: 2, scale: 1.02 }}
-        className={`relative bg-card/60 backdrop-blur-xl border border-card-border rounded-2xl overflow-hidden shadow-2xl flex flex-col h-full transform transition-all duration-300 hover:border-slate-500/50 ${item.score && item.score > 90 ? 'holographic-card shadow-[0_0_30px_rgba(168,85,247,0.15)]' : ''}`}>
+        className={`relative bg-card/60 backdrop-blur-xl border border-card-border rounded-2xl overflow-hidden shadow-2xl flex flex-col h-full transform transition-all duration-300 hover:border-slate-500/50 ${item.score && item.score > 90 ? 'holographic-card shadow-[0_0_30px_rgba(168,85,247,0.15)]' : ''} ${item.is_explored ? 'border-cyan-500/20 shadow-[0_0_20px_rgba(6,182,212,0.08)]' : ''}`}>
 
         {/* Card Image */}
         {item.image ? (
@@ -349,11 +375,60 @@ export default function Home() {
             </div>
           )}
 
-          <div className="flex items-center gap-2 mb-4">
+          {/* ── SCORE STRIP ─────────────────────────────────────────── */}
+          <div className="grid grid-cols-2 gap-1.5 mb-3">
+            {/* Match Score */}
+            {item.score !== undefined && (
+              <div className="flex items-center gap-1.5 bg-purple-500/10 border border-purple-500/20 rounded-lg px-2 py-1.5">
+                <BarChart2 className="w-3 h-3 text-purple-400 shrink-0" />
+                <div className="flex flex-col leading-none">
+                  <span className="text-[8px] text-slate-500 font-mono uppercase tracking-wider">Match</span>
+                  <span className="text-[11px] font-black text-purple-300">{item.score.toFixed(1)}%</span>
+                </div>
+              </div>
+            )}
+            {/* Sentiment */}
+            {item.sentiment !== undefined && (
+              <div className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-2 py-1.5">
+                <TrendingUp className="w-3 h-3 text-emerald-400 shrink-0" />
+                <div className="flex flex-col leading-none">
+                  <span className="text-[8px] text-slate-500 font-mono uppercase tracking-wider">Sentiment</span>
+                  <span className="text-[11px] font-black text-emerald-300">{item.sentiment.toFixed(0)}%</span>
+                </div>
+              </div>
+            )}
+            {/* Reliability */}
+            {item.reliability !== undefined && (
+              <div className="flex items-center gap-1.5 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-2 py-1.5">
+                <Star className="w-3 h-3 text-cyan-400 shrink-0" />
+                <div className="flex flex-col leading-none">
+                  <span className="text-[8px] text-slate-500 font-mono uppercase tracking-wider">Reliability</span>
+                  <span className="text-[11px] font-black text-cyan-300">{(item.reliability * 100).toFixed(0)}%</span>
+                </div>
+              </div>
+            )}
+            {/* Discount */}
+            {item.discount_pct !== undefined && item.discount_pct > 0 && (
+              <div className="flex items-center gap-1.5 bg-rose-500/10 border border-rose-500/20 rounded-lg px-2 py-1.5">
+                <Percent className="w-3 h-3 text-rose-400 shrink-0" />
+                <div className="flex flex-col leading-none">
+                  <span className="text-[8px] text-slate-500 font-mono uppercase tracking-wider">Discount</span>
+                  <span className="text-[11px] font-black text-rose-300">{item.discount_pct.toFixed(0)}% off</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
             <span className="text-[10px] text-slate-500 font-mono tracking-widest bg-card px-2 py-0.5 rounded-md border border-card-border whitespace-nowrap">{item.category || 'General'}</span>
-            {item.tags?.map(tag => (
+            {item.tags?.filter(t => t !== 'Explored Discovery').map(tag => (
               <span key={tag} className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-300">{tag}</span>
             ))}
+            {item.is_explored && (
+              <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 flex items-center gap-1">
+                <Compass className="w-2.5 h-2.5" /> Discovery
+              </span>
+            )}
           </div>
 
           <div className="mt-auto">
@@ -708,20 +783,81 @@ export default function Home() {
                     </div>
                   );
                 })}
-                {/* Explore Further Trigger */}
-                {items.length > 0 && !isProcessing && queryType === 'Indefinite Query' && (
-                  <div className="mt-12 py-10 flex flex-col items-center gap-6 border-t border-white/5">
-                    <div className="text-center space-y-2">
-                      <h4 className="text-lg font-black text-white uppercase tracking-tighter">Reach the limit of current nodes?</h4>
-                      <p className="text-xs text-slate-500 font-mono">My generative engine can extrapolate even deeper market dimensions.</p>
-                    </div>
-                    <button onClick={handleExploreFurther}
-                      className="group relative px-10 py-4 rounded-2xl bg-white text-black font-black text-xs uppercase tracking-[0.2em] shadow-[0_0_40px_rgba(255,255,255,0.2)] hover:shadow-[0_0_60px_rgba(255,255,255,0.4)] transition-all overflow-hidden">
-                      <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-purple-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                      <span className="relative z-10 group-hover:text-white flex items-center gap-2">
-                        <Zap className="w-4 h-4 fill-current" /> Explore Further
-                      </span>
-                    </button>
+                {/* Explore Further Trigger + Discovered Section */}
+                {items.length > 0 && (
+                  <div className="mt-12 space-y-8">
+
+                    {/* ── Explored Discoveries Section ───────────────────── */}
+                    {exploredItems.length > 0 && (
+                      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                        <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-2">
+                            <Compass className="w-5 h-5 text-cyan-400" />
+                            <h3 className="text-xl font-bold tracking-tight text-cyan-300 uppercase font-mono">Explored Discoveries</h3>
+                          </div>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
+                            {exploredItems.length} new product{exploredItems.length !== 1 ? 's' : ''} found
+                          </span>
+                          <div className="h-px flex-grow bg-gradient-to-r from-cyan-900/60 to-transparent" />
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                          <AnimatePresence>
+                            {exploredItems.map((item, idx) => renderProductCard(item, idx))}
+                          </AnimatePresence>
+                        </div>
+                        <div ref={exploreEndRef} />
+                      </motion.div>
+                    )}
+
+                    {/* ── Explore Further Button ──────────────────────────── */}
+                    {!isProcessing && (
+                      <div className="py-10 flex flex-col items-center gap-6 border-t border-white/5">
+                        <div className="text-center space-y-2">
+                          <h4 className="text-lg font-black text-white uppercase tracking-tighter flex items-center justify-center gap-2">
+                            <Compass className="w-5 h-5 text-cyan-400" />
+                            {exploreCount === 0 ? 'Want to discover more?' : `${exploreCount} product${exploreCount !== 1 ? 's' : ''} discovered — keep going?`}
+                          </h4>
+                          <p className="text-xs text-slate-500 font-mono">
+                            {exploreCount === 0
+                              ? 'Click to find 2 new similar products for your query. Click as many times as you want.'
+                              : 'Each click finds 2 more unique products. Never repeats a result.'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={handleExploreFurther}
+                          disabled={isExploring}
+                          className="group relative px-10 py-4 rounded-2xl overflow-hidden transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                          style={{ background: 'linear-gradient(135deg, rgba(6,182,212,0.15), rgba(168,85,247,0.15))', border: '1px solid rgba(6,182,212,0.3)' }}
+                        >
+                          <div className="absolute inset-0 bg-gradient-to-r from-cyan-400 to-purple-500 opacity-0 group-hover:opacity-20 transition-opacity rounded-2xl" />
+                          <span className="relative z-10 flex items-center gap-2 text-white font-black text-xs uppercase tracking-[0.2em]">
+                            {isExploring ? (
+                              <><Loader2 className="w-4 h-4 animate-spin" /> Discovering 2 products...</>
+                            ) : (
+                              <><Compass className="w-4 h-4 text-cyan-400" /> Explore Further — 2 New Products</>
+                            )}
+                          </span>
+                        </button>
+                        {isExploring && (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
+                            {[0, 1].map((i) => (
+                              <motion.div key={`skeleton-${i}`} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.1 }}
+                                className="rounded-2xl border border-cyan-500/20 overflow-hidden bg-card/40 backdrop-blur-xl">
+                                <div className="h-48 bg-gradient-to-br from-slate-900 to-slate-800 animate-pulse" />
+                                <div className="p-5 space-y-3">
+                                  <div className="h-4 bg-slate-800 rounded animate-pulse" />
+                                  <div className="h-3 bg-slate-800 rounded w-2/3 animate-pulse" />
+                                  <div className="grid grid-cols-2 gap-2">
+                                    {[0,1,2,3].map(j => <div key={j} className="h-8 bg-slate-800 rounded-lg animate-pulse" />)}
+                                  </div>
+                                  <div className="h-8 bg-slate-800 rounded-lg animate-pulse" />
+                                </div>
+                              </motion.div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
