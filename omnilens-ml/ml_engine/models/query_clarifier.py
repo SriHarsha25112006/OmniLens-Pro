@@ -277,14 +277,51 @@ class QueryClarifier:
     def _correct_spelling(self, text: str, changes: list) -> str:
         words = text.split()
         result = []
-        for word in words:
+        for idx, word in enumerate(words):
             clean = re.sub(r"[^a-zA-Z]", "", word.lower())
+            
+            # If word is unknown
             if len(clean) > 3 and clean not in CORRECTION_LEXICON:
+                # 1. Try static difflib against known lexicon
                 close = difflib.get_close_matches(clean, CORRECTION_LEXICON, n=1, cutoff=0.82)
                 if close and close[0] != clean:
                     changes.append(f'"{word}" → "{close[0]}" (spelling)')
                     result.append(close[0])
                     continue
+                
+                # 2. Contextual LLM recovery for totally unknown words (e.g. "biach" -> "beach")
+                try:
+                    from ml_engine.models.intent_parser import intent_parser
+                    tk, md = intent_parser._get_gen_model()
+                    if tk and md:
+                        # Mask out the unknown word and ask T5 what makes semantic sense
+                        masked_words = words.copy()
+                        masked_words[idx] = "<extra_id_0>"
+                        masked_text = " ".join(masked_words)
+                        
+                        inputs = tk(masked_text, return_tensors="pt").input_ids
+                        outputs = md.generate(inputs, max_new_tokens=20)
+                        prediction = tk.decode(outputs[0], skip_special_tokens=True).strip()
+                        
+                        # Scan LLM prediction for a word phonetically/visually similar to the typo
+                        pred_words = re.findall(r'[a-zA-Z]+', prediction.lower())
+                        best_match = None
+                        best_sim = 0.5  # Need at least 50% character similarity to apply context correction
+                        
+                        for pw in pred_words:
+                            if len(pw) > 2:
+                                sim = difflib.SequenceMatcher(None, clean, pw).ratio()
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_match = pw
+                                    
+                        if best_match:
+                            changes.append(f'"{word}" → "{best_match}" (contextual inference)')
+                            result.append(best_match)
+                            continue
+                except Exception as e:
+                    logger.warning(f"Contextual correction failed: {e}")
+
             result.append(word)
         return " ".join(result)
 
