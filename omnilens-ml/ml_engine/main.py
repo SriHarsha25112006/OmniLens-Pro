@@ -27,6 +27,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.async_api import async_playwright
 from ml_engine.models.intent_parser import intent_parser
+from ml_engine.models.query_clarifier import query_clarifier
 from ml_engine.services.scraper import scraper_service
 from ml_engine.services.evaluator import scoring_engine
 from ml_engine.services.session_manager import session_manager
@@ -48,6 +49,35 @@ app.add_middleware(
 class ShopRequest(BaseModel):
     prompt: str
     budgetStr: str
+
+class ClarifyRequest(BaseModel):
+    raw_input: str
+
+@app.post("/api/clarify_query")
+async def clarify_query(req: ClarifyRequest):
+    """
+    QueryClarifier endpoint — runs BEFORE the main stream_shop pipeline.
+    Corrects spelling, resolves ambiguity, detects scenario vs product intent,
+    and returns a formatted prompt for user confirmation (YES/NO).
+    
+    Response:
+    {
+      corrected_input: str,       # Spell-corrected version of raw input
+      understood_as: str,         # Human-readable summary of what we understood
+      formatted_prompt: str,      # Clean, structured prompt ready for pipeline
+      confidence: 'high'|'medium'|'low',
+      query_type: 'SCENARIO'|'PRODUCT'|'AMBIGUOUS',
+      changes_made: list[str],    # List of corrections made (for transparency)
+      needs_confirmation: bool    # Whether to show the confirmation dialog
+    }
+    """
+    result = query_clarifier.clarify(req.raw_input)
+    logger.info(
+        f"[QueryClarifier] '{req.raw_input[:60]}' → "
+        f"confidence={result['confidence']} | type={result['query_type']} | "
+        f"changes={result['changes_made']}"
+    )
+    return result
 
 async def process_item(item: dict, browser, log_q: asyncio.Queue) -> list[dict]:
     """

@@ -15,6 +15,20 @@ export default function Home() {
   const [hasStarted, setHasStarted] = useState(false);
   const [queryType, setQueryType] = useState<string | null>(null);
 
+  // ── QueryClarifier State ──────────────────────────────────────
+  type ClarifyResult = {
+    corrected_input: string;
+    understood_as: string;
+    formatted_prompt: string;
+    confidence: 'high' | 'medium' | 'low';
+    query_type: 'SCENARIO' | 'PRODUCT' | 'AMBIGUOUS';
+    changes_made: string[];
+    needs_confirmation: boolean;
+  };
+  const [clarifyResult, setClarifyResult] = useState<ClarifyResult | null>(null);
+  const [isClarifying, setIsClarifying] = useState(false);
+  const [clarifyPending, setClarifyPending] = useState(false); // waiting for user yes/no
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && !hasStarted) {
@@ -69,9 +83,51 @@ export default function Home() {
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
   useEffect(() => { if (exploredItems.length > 0) exploreEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [exploredItems]);
 
-  // ── Main search handler ───────────────────────────────────────────
+  // ── Main search handler (with QueryClarifier pre-step) ───────────────
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!prompt.trim()) return;
+
+    // Step 1: Run clarifier first
+    setIsClarifying(true);
+    try {
+      const res = await fetch(`${getApiUrl()}/api/clarify_query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw_input: prompt }),
+      });
+      const clarification = await res.json();
+      setIsClarifying(false);
+
+      if (clarification.needs_confirmation) {
+        // Show confirmation panel — user must confirm before proceeding
+        setClarifyResult(clarification);
+        setClarifyPending(true);
+        return;
+      }
+      // No changes needed — proceed directly with the formatted prompt
+      setPrompt(clarification.formatted_prompt || prompt);
+      await _runMainSearch(clarification.formatted_prompt || prompt);
+    } catch {
+      setIsClarifying(false);
+      // If clarification fails, proceed with raw input
+      await _runMainSearch(prompt);
+    }
+  };
+
+  const handleClarifyConfirm = async (accept: boolean) => {
+    if (!clarifyResult) return;
+    setClarifyPending(false);
+    if (accept) {
+      // YES: update prompt to the formatted version and run main search
+      setPrompt(clarifyResult.formatted_prompt);
+      await _runMainSearch(clarifyResult.formatted_prompt);
+    }
+    // NO: clear the panel, let user retype
+    setClarifyResult(null);
+  };
+
+  const _runMainSearch = async (finalPrompt: string) => {
     setIsProcessing(true);
     setStoreItems([]);
     setAllItems([]);
@@ -87,12 +143,12 @@ export default function Home() {
       const res = await fetch(`${getApiUrl()}/api/stream_shop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, budgetStr: noBudget ? '' : budgetStr }),
+        body: JSON.stringify({ prompt: finalPrompt, budgetStr: noBudget ? '' : budgetStr }),
       });
       if (!res.body) throw new Error('No readable stream.');
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = '';
+      let buffer = '';;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -576,13 +632,101 @@ export default function Home() {
                     </label>
                   </div>
                 </div>
-                <button type="submit" disabled={isProcessing || !prompt.trim()}
+                <button type="submit" disabled={isProcessing || isClarifying || !prompt.trim()}
                   className="mt-4 w-full group relative flex items-center justify-center gap-2 py-3 px-6 rounded-xl text-sm font-bold tracking-widest uppercase overflow-hidden transition-all duration-300
                   bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500
                   shadow-[0_0_20px_rgba(168,85,247,0.3)] hover:shadow-[0_0_30px_rgba(168,85,247,0.5)] disabled:shadow-none">
-                  {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : <><Zap className="w-4 h-4" /> Initialize Matrix</>}
+                  {isClarifying ? <><Loader2 className="w-4 h-4 animate-spin" /> Understanding query...</> :
+                   isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> :
+                   <><Zap className="w-4 h-4" /> Initialize Matrix</>}
                 </button>
               </form>
+
+              {/* ── QUERY CLARIFIER CONFIRMATION PANEL ─────────────────── */}
+              <AnimatePresence>
+                {clarifyPending && clarifyResult && (
+                  <motion.div
+                    key="clarify-panel"
+                    initial={{ opacity: 0, y: -10, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -10, scale: 0.97 }}
+                    transition={{ duration: 0.25 }}
+                    className="mx-5 mb-5 rounded-2xl border overflow-hidden"
+                    style={{
+                      borderColor: clarifyResult.confidence === 'high' ? 'rgba(52,211,153,0.3)' :
+                                   clarifyResult.confidence === 'medium' ? 'rgba(251,191,36,0.3)' :
+                                   'rgba(239,68,68,0.3)',
+                      background: 'rgba(0,0,0,0.4)',
+                      backdropFilter: 'blur(20px)',
+                    }}
+                  >
+                    {/* Header */}
+                    <div className="px-4 py-3 border-b border-white/5 flex items-center gap-2"
+                      style={{
+                        background: clarifyResult.confidence === 'high' ? 'rgba(52,211,153,0.08)' :
+                                    clarifyResult.confidence === 'medium' ? 'rgba(251,191,36,0.08)' :
+                                    'rgba(239,68,68,0.08)',
+                      }}
+                    >
+                      <div className={`w-2 h-2 rounded-full animate-pulse ${
+                        clarifyResult.confidence === 'high' ? 'bg-emerald-400' :
+                        clarifyResult.confidence === 'medium' ? 'bg-amber-400' : 'bg-rose-400'
+                      }`} />
+                      <span className="text-[10px] font-mono tracking-widest uppercase font-bold" style={{
+                        color: clarifyResult.confidence === 'high' ? '#34d399' :
+                               clarifyResult.confidence === 'medium' ? '#fbbf24' : '#ef4444'
+                      }}>
+                        Query Intelligence — {clarifyResult.confidence} confidence
+                      </span>
+                    </div>
+
+                    {/* Body */}
+                    <div className="px-4 py-4 space-y-3">
+                      {/* Understood as */}
+                      <div>
+                        <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mb-1">Interpreted as</p>
+                        <p className="text-sm font-semibold text-white leading-snug">{clarifyResult.understood_as}</p>
+                      </div>
+
+                      {/* Formatted prompt preview */}
+                      <div className="bg-white/[0.03] border border-white/[0.07] rounded-xl p-3">
+                        <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mb-2">Formatted prompt</p>
+                        <p className="text-[11px] text-slate-300 leading-relaxed line-clamp-4">{clarifyResult.formatted_prompt}</p>
+                      </div>
+
+                      {/* Changes made */}
+                      {clarifyResult.changes_made.length > 0 && (
+                        <div>
+                          <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mb-1.5">Corrections applied</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {clarifyResult.changes_made.map((change, i) => (
+                              <span key={i} className="text-[9px] px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono">
+                                {change}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* YES / NO Buttons */}
+                      <div className="flex gap-3 pt-1">
+                        <button
+                          onClick={() => handleClarifyConfirm(true)}
+                          className="flex-1 py-2.5 rounded-xl text-sm font-black uppercase tracking-wider bg-gradient-to-r from-emerald-600 to-cyan-600 text-white hover:from-emerald-500 hover:to-cyan-500 shadow-[0_0_15px_rgba(52,211,153,0.3)] hover:shadow-[0_0_25px_rgba(52,211,153,0.5)] transition-all"
+                        >
+                          ✓ Yes, search this
+                        </button>
+                        <button
+                          onClick={() => handleClarifyConfirm(false)}
+                          className="flex-1 py-2.5 rounded-xl text-sm font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-400 hover:bg-rose-500/10 hover:border-rose-500/30 hover:text-rose-300 transition-all"
+                        >
+                          ✗ No, retype
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {/* Live Engine Feed */}
               <div className="flex-grow relative min-h-0 px-5 pb-5">

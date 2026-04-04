@@ -15,6 +15,12 @@ OmniLens Pro is an AI-powered shopping assistant that takes a natural language q
 User Query
     |
     v
+[Stage 0] Query Clarifier (Pre-processing & UX Confirmation)
+    |-- Detects Vagueness / Spelling Errors
+    |-- Restructures Query cleanly
+    |-- Asks User YES/NO to confirm format
+    |
+    v (On 'YES')
 [Stage 1] Intent Classification (3-tier pipeline)
     |
     v SCENARIO or PRODUCT
@@ -157,7 +163,65 @@ Output: "OmniLens is a shopping assistant. Try asking about products!"
 
 ---
 
-## Feature 2: Intent Classification Pipeline (Behind the Scenes)
+## Feature 2: Query Clarifier (Pre-processing & Confirmation)
+
+### What it does
+
+Before any expensive ML models or web scrapers run, the *QueryClarifier* cleans up the user's input. It corrects spelling mistakes, resolves slang/abbreviations, detects vague scenarios, and formats them into a high-quality prompt. If the input was severely misspelled or overly vague, it pauses and asks the user to confirm ("Yes, search this" or "No, retype").
+
+### Input → Decision Flow
+
+#### Case 1: Slang and Typos
+
+```
+Input:  "wanna get best headfhones for my runing"
+```
+
+**What happens:**
+1. Slang dictionary replaces "wanna" → "want to"
+2. Fuzzy matching via difflib corrects "headfhones" → "headphones", "runing" → "running"
+3. Re-formats into a clean product search
+
+```
+Output: "Find me the best headphones available in India with good reviews and value for money."
+Confidence: Medium (due to multiple corrections)
+UI: Pauses and asks user to confirm the corrected query.
+```
+
+#### Case 2: Broad/Vague Scenario
+
+```
+Input:  "i need stuff for college"
+```
+
+**What happens:**
+1. No specific product detected. Treated as a vague action.
+2. Reformats into a structured request.
+
+```
+Output: "Help me shop for: I need stuff for college. Find the most relevant products with good ratings and value for money."
+Confidence: Low (very vague)
+UI: Shows interpreted intent and requires user confirmation.
+```
+
+#### Case 3: Recognized Specific Scenario Template
+
+```
+Input:  "home gym"
+```
+
+**What happens:**
+1. Triggers one of the 15+ hardcoded high-quality scenario templates immediately.
+
+```
+Output: "I want to set up a home gym. Help me find all the essential workout equipment and accessories."
+Confidence: High 
+UI: Pauses if confidence is High but a template expansion occurred, giving the user transparency on what will be searched.
+```
+
+---
+
+## Feature 3: Intent Classification Pipeline (Behind the Scenes)
 
 ### Tier 1: Taxonomy Keyword Match (Instant, under 1ms)
 
@@ -205,7 +269,7 @@ Output: PRODUCT (99% for label 1) → route to product search
 
 ---
 
-## Feature 3: Category and Variant Generation (Flan-T5)
+## Feature 4: Category and Variant Generation (Flan-T5)
 
 ### 3A: Scenario → Category List
 
@@ -231,7 +295,7 @@ Up to 10 variants dispatched concurrently.
 
 ---
 
-## Feature 4: Product Scraping (Amazon + Flipkart)
+## Feature 5: Product Scraping (Amazon + Flipkart)
 
 ### What it does
 
@@ -265,7 +329,7 @@ Then: New browser context launched with rotated user-agent
 
 ---
 
-## Feature 5: Product Evaluation and Composite Scoring
+## Feature 6: Product Evaluation and Composite Scoring
 
 Each scraped product passes through 6 scoring signals weighted into a composite score.
 
@@ -344,7 +408,7 @@ UI displays: Match Score: 82%
 
 ---
 
-## Feature 6: Results Page
+## Feature 7: Results Page
 
 ### What the user sees
 
@@ -376,7 +440,7 @@ Filter:   Price range slider | Brand checkboxes | Minimum rating
 
 ---
 
-## Feature 7: Explore Further (Product Graph)
+## Feature 8: Explore Further (Product Graph)
 
 ### What it does
 
@@ -407,7 +471,7 @@ Then: "No related products found for this item."
 
 ---
 
-## Feature 8: Wishlist
+## Feature 9: Wishlist
 
 ### What it does
 
@@ -437,7 +501,7 @@ Then: Toast: "Already in your wishlist" (no duplicate added)
 
 ---
 
-## Feature 9: Cart and Budget Tracking
+## Feature 10: Cart and Budget Tracking
 
 ### What it does
 
@@ -464,7 +528,7 @@ Output: Cart exceeds your budget by Rs 31,990
 
 ---
 
-## Feature 10: Receipts Page
+## Feature 11: Receipts Page
 
 ### What it does
 
@@ -483,7 +547,7 @@ Output: Receipt timeline (newest first)
 
 ---
 
-## Feature 11: AI Shopping Assistant (Chatbot)
+## Feature 12: AI Shopping Assistant (Chatbot)
 
 ### What it does
 
@@ -594,7 +658,7 @@ If off-topic:
 
 ---
 
-## Feature 12: Heuristic Fallbacks and Error Recovery
+## Feature 13: Heuristic Fallbacks and Error Recovery
 
 These run silently in the background to ensure robustness.
 
