@@ -97,12 +97,12 @@ class LTRScoringEngine:
 
     def _load_embedding_model(self):
         try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("[LTR] Loading BGE-small-en-v1.5...")
-            self._embedding_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
-            logger.info("[LTR] BGE embedding model loaded.")
+            from sentence_transformers import CrossEncoder
+            logger.info("[LTR] Loading cross-encoder/ms-marco-MiniLM-L-6-v2 for reranking...")
+            self._embedding_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512)
+            logger.info("[LTR] Cross-Encoder loaded.")
         except Exception as e:
-            logger.error(f"[LTR] BGE load failed ({e}). Will use word-overlap fallback.")
+            logger.error(f"[LTR] Cross-Encoder load failed ({e}). Will use fallback.")
             self._embedding_model = None
 
     def _load_ltr_model(self):
@@ -114,8 +114,8 @@ class LTRScoringEngine:
                 return
             except Exception as e:
                 logger.warning(f"[LTR] Model load failed ({e}). Retraining...")
-        logger.info("[LTR] No persisted model found. Running synthetic bootstrap training...")
-        self._bootstrap_and_train()
+        logger.info("[LTR] No persisted model found. Training True LTR model from labeled dataset...")
+        self._train_from_dataset()
 
     def _load_rlhf_bias(self):
         if os.path.exists(_BIAS_PATH):
@@ -143,129 +143,106 @@ class LTRScoringEngine:
     # Synthetic Bootstrap Training
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _bootstrap_and_train(self):
+    def _train_from_dataset(self):
         """
-        Trains a LightGBM LambdaRank model on 2000 synthetic examples
-        (40 queries × 50 products each) with heuristic relevance labels.
-        
-        Relevance labels (0-3):
-            3 = excellent  (high semantic + high rating + high sentiment)
-            2 = good
-            1 = ok
-            0 = poor
+        Trains a LightGBM LambdaRank model on the true labeled dataset (ltr_dataset.json).
         """
-        try:
-            import lightgbm as lgb
+        import lightgbm as lgb
+        dataset_path = os.path.join(_MODELS_DIR, "ltr_dataset.json")
+        if not os.path.exists(dataset_path):
+            logger.error(f"[LTR] Dataset {dataset_path} not found. Cannot train LTR.")
+            return
 
-            rng = np.random.default_rng(42)
-            n_queries, n_per_q = 40, 50
+        try:
+            with open(dataset_path, "r") as f:
+                data = json.load(f)
 
             X_all, y_all, groups = [], [], []
 
-            for _ in range(n_queries):
-                n = n_per_q
-                # Realistic feature distributions
-                semantic_sim  = rng.beta(2.5, 2.5, n)
-                rating        = rng.beta(6, 2, n)              # Amazon-skewed high
-                review_count  = rng.beta(1.5, 4, n)
-                sentiment     = rng.beta(5, 2, n)
-                brand_trust   = rng.choice([0.4, 1.0], n, p=[0.72, 0.28])
-                discount      = rng.beta(1.2, 5, n)
-                sales_volume  = rng.beta(1.2, 4.5, n)
-                reliability   = (0.40 * review_count + 0.30 * brand_trust
-                                 + 0.20 * semantic_sim + 0.10 * sentiment)
+            # We need to construct feature vectors for training. 
+            # We will compute them using our standard logic.
+            logger.info(f"[LTR] Compiling {len(data)} queries for True LTR training...")
+            for group in data:
+                q = group["query"]
+                items = group.get("items", [])
+                if not items:
+                    continue
 
-                X_q = np.column_stack([
-                    semantic_sim, rating, review_count, sentiment,
-                    brand_trust, discount, sales_volume, reliability
-                ])
+                X_q, y_q = [], []
+                for item in items:
+                    # Map dataset JSON schema to expected dict format
+                    simulated_scraped = {
+                        "title": item["title"],
+                        "rating": item.get("rating", 4.0),
+                        "sales_volume": item.get("review_count", 0), # mapping review_count to sales_volume logic
+                        "discount": item.get("discount", 0),
+                        # Simple fake review for sentiment
+                        "reviews": ["Good product"] if item.get("sentiment_label") == "positive" else ["Bad product"] if item.get("sentiment_label") == "negative" else []
+                    }
+                    if item.get("is_bestseller"):
+                        simulated_scraped["title"] += " " + next(iter(TRUSTED_BRANDS)) # fake brand trust
+                    
+                    fv, _ = self._build_feature_vector(simulated_scraped, q)
+                    X_q.append(fv)
+                    y_q.append(int(item.get("relevance", 0)))
 
-                # Heuristic relevance score → discretize to 0-3
-                rel_raw = (
-                    0.28 * semantic_sim +
-                    0.22 * rating        +
-                    0.20 * sentiment     +
-                    0.12 * brand_trust   +
-                    0.08 * review_count  +
-                    0.05 * discount      +
-                    0.05 * sales_volume
-                )
-                y_q = np.digitize(rel_raw, bins=[0.25, 0.50, 0.72]).astype(int)
+                if len(X_q) > 0:
+                    X_all.append(np.vstack(X_q))
+                    y_all.append(np.array(y_q))
+                    groups.append(len(X_q))
 
-                X_all.append(X_q)
-                y_all.append(y_q)
-                groups.append(n)
+            if not X_all:
+                logger.error("[LTR] No valid training data compiled.")
+                return
 
             X = np.vstack(X_all).astype(np.float32)
             y = np.concatenate(y_all).astype(int)
 
-            train_data = lgb.Dataset(
-                X, label=y, group=groups,
-                feature_name=FEATURE_NAMES,
-            )
-
+            train_data = lgb.Dataset(X, label=y, group=groups, feature_name=FEATURE_NAMES)
             params = {
                 "objective":      "lambdarank",
                 "metric":         "ndcg",
                 "ndcg_eval_at":   [5, 10],
                 "num_leaves":     31,
                 "learning_rate":  0.05,
-                "min_data_in_leaf": 5,
+                "min_data_in_leaf": 3,
                 "verbose":        -1,
             }
 
-            logger.info("[LTR] Training LightGBM LambdaRank (200 rounds)...")
-            self._ltr_model = lgb.train(params, train_data, num_boost_round=200)
+            logger.info("[LTR] Training LightGBM LambdaRank on true dataset...")
+            self._ltr_model = lgb.train(params, train_data, num_boost_round=150)
 
             os.makedirs(_MODELS_DIR, exist_ok=True)
             with open(_MODEL_PATH, "wb") as f:
                 pickle.dump(self._ltr_model, f)
-            logger.info(f"[LTR] Model trained & saved → {_MODEL_PATH}")
+            logger.info(f"[LTR] True LTR Model trained & saved → {_MODEL_PATH}")
 
         except Exception as e:
-            logger.error(f"[LTR] Bootstrap training failed: {e}", exc_info=True)
+            logger.error(f"[LTR] True LTR training failed: {e}", exc_info=True)
             self._ltr_model = None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Feature Engineering
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _encode(self, text: str) -> Optional[np.ndarray]:
-        if self._embedding_model is None or not text:
-            return None
-        try:
-            return self._embedding_model.encode(text.strip()[:256], normalize_embeddings=True)
-        except Exception as e:
-            logger.warning(f"[LTR] Encode failed: {e}")
-            return None
-
-    def _get_title_embedding(self, title: str) -> Optional[np.ndarray]:
-        if title in self._emb_cache:
-            return self._emb_cache[title]
-        emb = self._encode(title)
-        if emb is not None:
-            # LRU-lite: evict oldest if cache full
-            if len(self._emb_cache) >= 500:
-                self._emb_cache.pop(next(iter(self._emb_cache)))
-            self._emb_cache[title] = emb
-        return emb
-
     def _semantic_similarity(self, query: str, title: str) -> float:
         """
-        BGE cosine similarity between query and product title.
-        Embeddings are L2-normalized by BGE, so cosine = dot product.
+        Cross-Encoder similarity between query and product title.
+        Provides a much stronger relevance signal than simple cosine sim.
         Falls back to word-overlap Jaccard if model unavailable.
         """
         if not query:
             return 0.5
 
-        q_emb = self._encode(query)
-        t_emb = self._get_title_embedding(title)
-
-        if q_emb is not None and t_emb is not None:
-            # Cosine similarity in [-1, 1] → shift to [0, 1]
-            cos = float(np.dot(q_emb, t_emb))
-            return float(max(0.0, min(1.0, (cos + 1.0) / 2.0)))
+        if self._embedding_model is not None:
+            # Cross-encoder returns logit (typically -10 to +10)
+            # We sigmoid-squash it to [0, 1] range to behave like the old cosine sim
+            try:
+                logit = float(self._embedding_model.predict([query, title[:256]]))
+                score = 1.0 / (1.0 + math.exp(-logit * 0.5))
+                return score
+            except Exception as e:
+                logger.warning(f"[LTR] Cross-Encoder prediction failed: {e}")
 
         # Fallback: word overlap
         q_w = set(re.findall(r'\w+', query.lower()))

@@ -17,6 +17,8 @@ import urllib.parse
 from playwright.async_api import async_playwright, BrowserContext
 from playwright_stealth import Stealth
 
+from ml_engine.services.vector_db import vector_db
+
 logger = logging.getLogger(__name__)
 
 _STEALTH_HEADERS = {
@@ -164,6 +166,20 @@ class ScraperService:
                 await _log(f"⚡ Cache hit: '{item_name}' retrieved from memory.")
                 return cached_results
 
+        # ── Query FAISS Vector Database ─────────────────────────────────
+        # This provides instant retrieval without scraping if we have highly relevant products cached
+        try:
+            # We run it in executor since faiss search might block the event loop briefly
+            db_results = await asyncio.to_thread(vector_db.search, item_name, top_k=15)
+            # Filter for highly confident matches
+            high_conf = [r for r in db_results if r.get("_faiss_score", 0) > 0.65]
+            if len(high_conf) >= 3:
+                await _log(f"⚡ Vector DB hit: Found {len(high_conf)} high-confidence nodes in FAISS for '{item_name}'.")
+                self._cache[clean_key] = (time.time(), high_conf)
+                return high_conf
+        except Exception as e:
+            logger.error(f"[FAISS] Search error in scraper: {e}")
+
         await _log(f"🔎 '{item_name}' → queued for multi-node extraction")
 
         async with self._sem:
@@ -175,6 +191,7 @@ class ScraperService:
             if results is not None:
                 await _log(f"✅ Combined Ranking: Found {len(results)} total nodes from Amazon.")
                 self._cache[clean_key] = (time.time(), results)
+                await asyncio.to_thread(vector_db.upsert_products, results)
                 return results
 
             # ── Amazon blocked — try Flipkart fallback ────────────────────
@@ -183,6 +200,7 @@ class ScraperService:
             if results:
                 await _log(f"✅ Combined Ranking: Found {len(results)} total nodes from Flipkart.")
                 self._cache[clean_key] = (time.time(), results)
+                await asyncio.to_thread(vector_db.upsert_products, results)
                 return results
 
             # Both blocked — caller rotates context
