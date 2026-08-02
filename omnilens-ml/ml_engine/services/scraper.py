@@ -134,9 +134,13 @@ _AMAZON_JS = """() => {
 }"""
 
 
+import time
+
 class ScraperService:
     def __init__(self):
-        self._sem = asyncio.Semaphore(1)
+        # Allow up to 3 concurrent stealth extractions for high throughput without triggering bot blocks
+        self._sem = asyncio.Semaphore(3)
+        self._cache = {}  # {query: (timestamp, results)}
 
     # ─── Public API ──────────────────────────────────────────────────────────
 
@@ -151,15 +155,26 @@ class ScraperService:
                     log_cb(msg)
 
         exclude_links = set(exclude_links or [])
+        clean_key = item_name.lower().strip()
+
+        # Check in-memory TTL cache (15 min validity) for instant sub-millisecond retrieval
+        if clean_key in self._cache:
+            cache_time, cached_results = self._cache[clean_key]
+            if time.time() - cache_time < 900:
+                await _log(f"⚡ Cache hit: '{item_name}' retrieved from memory.")
+                return cached_results
+
         await _log(f"🔎 '{item_name}' → queued for multi-node extraction")
 
         async with self._sem:
-            await asyncio.sleep(random.uniform(0.4, 1.2))
+            # Minimal jitter delay to humanize request stream without bottlenecking pipeline
+            await asyncio.sleep(random.uniform(0.1, 0.35))
 
             # ── Try Amazon ────────────────────────────────────────────────
             results = await self._scrape_amazon(item_name, context, _log, exclude_links=exclude_links)
             if results is not None:
                 await _log(f"✅ Combined Ranking: Found {len(results)} total nodes from Amazon.")
+                self._cache[clean_key] = (time.time(), results)
                 return results
 
             # ── Amazon blocked — try Flipkart fallback ────────────────────
@@ -167,6 +182,7 @@ class ScraperService:
             results = await self._scrape_flipkart(item_name, context, _log)
             if results:
                 await _log(f"✅ Combined Ranking: Found {len(results)} total nodes from Flipkart.")
+                self._cache[clean_key] = (time.time(), results)
                 return results
 
             # Both blocked — caller rotates context
@@ -193,7 +209,7 @@ class ScraperService:
             await log_cb(f"🌐 Amazon → {item_name}")
 
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=18000)
             except Exception:
                 await log_cb(f"⚠️ Navigation timeout for '{item_name}'. Rotating Context...")
                 return None
@@ -207,20 +223,20 @@ class ScraperService:
                 await log_cb(f"🛑 Amazon CAPTCHA for '{item_name}'")
                 return None
 
-            # Wait for product grid
+            # Fast selector check
             grid_sel = 'div[data-component-type="s-search-result"]'
             try:
-                await page.wait_for_selector(grid_sel, timeout=10000)
+                await page.wait_for_selector(grid_sel, timeout=4000)
             except Exception:
                 try:
-                    await page.wait_for_selector('div[data-asin]:not([data-asin=""])', timeout=8000)
+                    await page.wait_for_selector('div[data-asin]:not([data-asin=""])', timeout=3000)
                 except Exception:
                     pass
 
-            # ── Multi-pass scroll to trigger lazy loading ─────────────────
-            for y in [300, 700, 1100, 1500, 1000, 500, 0]:
+            # ── Fast multi-pass scroll for lazy loading ──────────────────
+            for y in [400, 1100, 0]:
                 await page.evaluate(f"window.scrollTo(0, {y})")
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.1)
 
             # Force-resolve all lazy-loaded images (data-src → src)
             await page.evaluate("""
@@ -231,7 +247,7 @@ class ScraperService:
                     }
                 });
             """)
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(0.15)
 
             # ── Extract all product data via JavaScript ────────────────────
             data = await page.evaluate(_AMAZON_JS)

@@ -90,40 +90,41 @@ export default function Home() {
 
     // Step 1: Run clarifier first
     setIsClarifying(true);
-    try {
-      const res = await fetch(`${getApiUrl()}/api/clarify_query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ raw_input: prompt }),
-      });
-      const clarification = await res.json();
-      setIsClarifying(false);
-
-      if (clarification.needs_confirmation) {
-        // Show confirmation panel — user must confirm before proceeding
-        setClarifyResult(clarification);
-        setClarifyPending(true);
-        return;
+    let clarification = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${getApiUrl()}/api/clarify_query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw_input: prompt }),
+        });
+        if (res.ok) {
+          clarification = await res.json();
+          break;
+        }
+      } catch {
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
       }
-      // No changes needed — proceed directly with the formatted prompt
-      setPrompt(clarification.formatted_prompt || prompt);
-      await _runMainSearch(clarification.formatted_prompt || prompt);
-    } catch {
-      setIsClarifying(false);
-      // If clarification fails, proceed with raw input
-      await _runMainSearch(prompt);
     }
+    setIsClarifying(false);
+
+    if (clarification?.needs_confirmation) {
+      setClarifyResult(clarification);
+      setClarifyPending(true);
+      return;
+    }
+    const finalP = clarification?.formatted_prompt || prompt;
+    setPrompt(finalP);
+    await _runMainSearch(finalP);
   };
 
   const handleClarifyConfirm = async (accept: boolean) => {
     if (!clarifyResult) return;
     setClarifyPending(false);
     if (accept) {
-      // YES: update prompt to the formatted version and run main search
       setPrompt(clarifyResult.formatted_prompt);
       await _runMainSearch(clarifyResult.formatted_prompt);
     }
-    // NO: clear the panel, let user retype
     setClarifyResult(null);
   };
 
@@ -139,16 +140,32 @@ export default function Home() {
     setStatusMessage('Uplinking to ML Engine: Parsing Intent Vector...');
     const sessionPrefix = `s${Date.now()}_`;
 
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        res = await fetch(`${getApiUrl()}/api/stream_shop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: finalPrompt, budgetStr: noBudget ? '' : budgetStr }),
+        });
+        if (res.ok) break;
+      } catch (err) {
+        if (attempt === 2) {
+          console.error(err);
+          setIsProcessing(false);
+          setStatusMessage('ML Engine offline. Ensure backend server is running on http://127.0.0.1:8000');
+          return;
+        }
+        setStatusMessage(`Connecting to ML Engine (attempt ${attempt + 2}/3)...`);
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+
     try {
-      const res = await fetch(`${getApiUrl()}/api/stream_shop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: finalPrompt, budgetStr: noBudget ? '' : budgetStr }),
-      });
-      if (!res.body) throw new Error('No readable stream.');
+      if (!res || !res.body) throw new Error('No readable stream.');
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = '';;
+      let buffer = '';
 
       while (true) {
         const { value, done } = await reader.read();
@@ -184,7 +201,6 @@ export default function Home() {
                   )
                 );
               } else {
-                // If it's a new sub-item (e.g. 1_0) starting analysis, add it as a placeholder
                 setStoreItems([...items, { ...data, id: targetId, name: data.statusText || 'Processing...', status: 'analyzing', progress: data.progress, category: 'Components', external_link: '#' }]);
               }
             } else if (event === 'item_finish') {
@@ -192,7 +208,6 @@ export default function Home() {
               const baseId = targetId.split('_')[0];
               const currentItems = useStore.getState().items;
 
-              // Remove the generic placeholder (e.g. ID "1") if we're receiving a specific result for it
               const filtered = currentItems.filter(it => it.id !== baseId);
               const exists = filtered.some(i => i.id === targetId);
 
@@ -209,7 +224,6 @@ export default function Home() {
             } else if (event === 'done') {
               setStatusMessage('Pipeline sequence complete.');
               setIsProcessing(false);
-              // Clean up any remaining "pending" placeholders from the expansion
               const finalItems = useStore.getState().items.filter(it => it.status === 'complete');
               if (finalItems.length > 0) {
                 setStoreItems(finalItems);
@@ -227,7 +241,7 @@ export default function Home() {
     } catch (error) {
       console.error(error);
       setIsProcessing(false);
-      setStatusMessage('Connection severed. Reboot required.');
+      setStatusMessage('Connection interrupted. Please try again.');
     }
   };
 
@@ -579,7 +593,7 @@ export default function Home() {
             className="flex flex-col xl:flex-row min-h-screen">
 
             {/* LEFT PANEL */}
-            <div className="relative w-full xl:w-[400px] flex-shrink-0 xl:h-screen flex flex-col cyber-glass border-r border-card-border overflow-hidden data-stream">
+            <div className="relative w-full xl:w-[400px] flex-shrink-0 xl:h-screen flex flex-col cyber-glass border-r border-card-border overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 data-stream">
 
               {/* Header */}
               <div className="flex items-center justify-between px-5 py-4 border-b border-card-border bg-black/5 dark:bg-black/20 flex-shrink-0">
@@ -651,17 +665,17 @@ export default function Home() {
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: -10, scale: 0.97 }}
                     transition={{ duration: 0.25 }}
-                    className="mx-5 mb-5 rounded-2xl border overflow-hidden"
+                    className="mx-5 mb-5 rounded-2xl border overflow-hidden flex flex-col max-h-[60vh] shrink-0 shadow-2xl"
                     style={{
                       borderColor: clarifyResult.confidence === 'high' ? 'rgba(52,211,153,0.3)' :
                                    clarifyResult.confidence === 'medium' ? 'rgba(251,191,36,0.3)' :
                                    'rgba(239,68,68,0.3)',
-                      background: 'rgba(0,0,0,0.4)',
+                      background: 'rgba(0,0,0,0.6)',
                       backdropFilter: 'blur(20px)',
                     }}
                   >
                     {/* Header */}
-                    <div className="px-4 py-3 border-b border-white/5 flex items-center gap-2"
+                    <div className="px-4 py-3 border-b border-white/5 flex items-center gap-2 shrink-0"
                       style={{
                         background: clarifyResult.confidence === 'high' ? 'rgba(52,211,153,0.08)' :
                                     clarifyResult.confidence === 'medium' ? 'rgba(251,191,36,0.08)' :
@@ -680,8 +694,8 @@ export default function Home() {
                       </span>
                     </div>
 
-                    {/* Body */}
-                    <div className="px-4 py-4 space-y-3">
+                    {/* Scrollable Content */}
+                    <div className="px-4 py-4 space-y-3 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 flex-1">
                       {/* Understood as */}
                       <div>
                         <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mb-1">Interpreted as</p>
@@ -691,7 +705,7 @@ export default function Home() {
                       {/* Formatted prompt preview */}
                       <div className="bg-white/[0.03] border border-white/[0.07] rounded-xl p-3">
                         <p className="text-[9px] font-mono text-slate-500 uppercase tracking-widest mb-2">Formatted prompt</p>
-                        <p className="text-[11px] text-slate-300 leading-relaxed line-clamp-4">{clarifyResult.formatted_prompt}</p>
+                        <p className="text-[11px] text-slate-300 leading-relaxed max-h-36 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700">{clarifyResult.formatted_prompt}</p>
                       </div>
 
                       {/* Changes made */}
@@ -707,22 +721,22 @@ export default function Home() {
                           </div>
                         </div>
                       )}
+                    </div>
 
-                      {/* YES / NO Buttons */}
-                      <div className="flex gap-3 pt-1">
-                        <button
-                          onClick={() => handleClarifyConfirm(true)}
-                          className="flex-1 py-2.5 rounded-xl text-sm font-black uppercase tracking-wider bg-gradient-to-r from-emerald-600 to-cyan-600 text-white hover:from-emerald-500 hover:to-cyan-500 shadow-[0_0_15px_rgba(52,211,153,0.3)] hover:shadow-[0_0_25px_rgba(52,211,153,0.5)] transition-all"
-                        >
-                          ✓ Yes, search this
-                        </button>
-                        <button
-                          onClick={() => handleClarifyConfirm(false)}
-                          className="flex-1 py-2.5 rounded-xl text-sm font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-400 hover:bg-rose-500/10 hover:border-rose-500/30 hover:text-rose-300 transition-all"
-                        >
-                          ✗ No, retype
-                        </button>
-                      </div>
+                    {/* Pinned YES / NO Buttons */}
+                    <div className="px-4 py-3 bg-black/40 border-t border-white/5 flex gap-3 shrink-0">
+                      <button
+                        onClick={() => handleClarifyConfirm(true)}
+                        className="flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-black uppercase tracking-wider bg-gradient-to-r from-emerald-600 to-cyan-600 text-white hover:from-emerald-500 hover:to-cyan-500 shadow-[0_0_15px_rgba(52,211,153,0.3)] hover:shadow-[0_0_25px_rgba(52,211,153,0.5)] transition-all"
+                      >
+                        ✓ Yes, search this
+                      </button>
+                      <button
+                        onClick={() => handleClarifyConfirm(false)}
+                        className="flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-black uppercase tracking-wider bg-white/5 border border-white/10 text-slate-400 hover:bg-rose-500/10 hover:border-rose-500/30 hover:text-rose-300 transition-all"
+                      >
+                        ✗ No, retype
+                      </button>
                     </div>
                   </motion.div>
                 )}

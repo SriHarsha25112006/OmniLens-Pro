@@ -292,5 +292,10 @@ class ScoringEngine:
             combined = (new_weights.get("bestseller", 0) + new_weights.get("sales", 0)) / 2
             self.weights["volume"] = combined
             self.weights["brand_trust"] = combined
+        
+        # Normalize the whole weights dictionary to sum to exactly 1.0
+        total = sum(self.weights.values())
+        if total > 0:
+            self.weights = {k: v / total for k, v in self.weights.items()}
 
 scoring_engine = ScoringEngine()

@@ -18,6 +18,14 @@ const mockSkiingChecklist = [
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+interface MockItem {
+  id: string;
+  name: string;
+  category: string;
+  essentiality: number;
+  estimatedCost: number;
+}
+
 export async function POST(req: Request) {
   try {
     const { prompt, budgetStr } = await req.json();
@@ -28,7 +36,7 @@ export async function POST(req: Request) {
     const readable = new ReadableStream({
       async start(controller) {
         // Helper to send SSE data
-        const sendEvent = (event: string, data: any) => {
+        const sendEvent = (event: string, data: Record<string, any>) => {
           controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
         };
 
@@ -43,8 +51,8 @@ export async function POST(req: Request) {
         // Phase 3 Preview: Budget Fallback Logic (Greedy Knapsack)
         // Calculate minimum viable cost (sum of items with essentiality >= 0.8)
         let totalCost = 0;
-        let selectedItems: typeof mockSkiingChecklist = [];
-        let rejectedItems: typeof mockSkiingChecklist = [];
+        let selectedItems: MockItem[] = [];
+        let rejectedItems: MockItem[] = [];
         
         // Sort by essentiality descending, then cost ascending as a tiebreaker
         const sortedItems = [...mockSkiingChecklist].sort(
@@ -75,7 +83,7 @@ export async function POST(req: Request) {
 
         // Phase 2: Concurrent Scraping & ML Evaluation Simulation
         // We simulate parallel processing by wrapping them in async IIFEs that resolve independently
-        const processItem = async (item: any) => {
+        const processItem = async (item: MockItem) => {
           // Status 1: Scraping
           await sleep(Math.random() * 1500 + 500);
           sendEvent('item_update', { id: item.id, status: 'scraping', statusText: 'Scraping 4 platforms...', progress: 30 });

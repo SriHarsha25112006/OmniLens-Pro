@@ -175,7 +175,7 @@ export const useStore = create<OmniStore>()(
                 set((s) => {
                     const exists = s.wishlist.some((w) => w.id === item.id);
                     if (!exists) {
-                        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                        const apiUrl = getApiUrl();
                         fetch(`${apiUrl}/api/rl_feedback`, {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ id: item.id, name: item.name, finalPrice: item.finalPrice || 0, platform: item.platform || '', sentiment: item.sentiment || 0, score: item.score || 0, tags: item.tags || [] })

@@ -82,7 +82,13 @@ class IntentParser:
             'shoe', 'sneaker', 'shirt', 't-shirt', 'jacket', 'jeans', 'bag', 'backpack',
             'bottle', 'mat', 'board', 'game', 'toy', 'book', 'pen', 'desk', 'chair',
             'table', 'sofa', 'couch', 'bed', 'mattress', 'pillow', 'blanket', 'towel',
-            'microwave', 'oven', 'fridge', 'refrigerator', 'washer', 'dryer', 'dishwasher'
+            'microwave', 'oven', 'fridge', 'refrigerator', 'washer', 'dryer', 'dishwasher',
+            
+            # Common Shopping Scenarios & Activity Keywords (to prevent false typo corrections)
+            'gaming', 'setup', 'build', 'trip', 'vacation', 'camping', 'hiking', 'trekking', 
+            'border', 'beach', 'office', 'home', 'smart', 'nursery', 'video', 'editing', 'music', 
+            'production', 'theatre', 'theater', 'coding', 'programmer', 'workout', 'fitness', 
+            'gym', 'decor', 'gardening', 'study', 'student', 'college'
         }
 
         logger.info("Intent Parser v2 initialized with Taxonomy. NLP models will load on-demand.")

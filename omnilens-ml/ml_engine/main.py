@@ -37,11 +37,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="OmniLens ML Engine")
 
-# Allow Next.js frontend to access SSE
+# Allow Next.js frontend to access SSE & API endpoints
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
