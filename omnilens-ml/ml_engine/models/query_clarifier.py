@@ -1,219 +1,155 @@
 """
-QueryClarifier (OmniLens Pro v2)
-================================
-A lightweight pre-processing model that sits between the user's raw input
-and the main shopping pipeline. It handles:
+QueryClarifier (OmniLens Pro v3 - Deep Learning Edition)
+=========================================================
+Neural Pre-Processing Engine powered by PyTorch, HuggingFace Transformers,
+Vector Embedding Cosine Similarity, and Seq2Seq Generative Rewriting.
 
-1. Spell correction (difflib fuzzy match against a curated entity/word vocab)
-2. Intent reformulation (scenario → structured prompt template)
-3. Ambiguity detection (flags vague/incomplete queries)
-4. Formatting (standardises the output into a clean, structured prompt
-   ready for the OmniLens pipeline)
-
-The clarified prompt is returned to the frontend for YES/NO confirmation
-before the main search begins. If the user rejects, they retype and the
-clarifier runs again.
-
-Architecture Notes (HieraSpark context):
-- This is a deterministic NLP pre-processor (no neural inference cost).
-- It runs in <10ms, adding zero perceptible latency.
-- The structured output it produces significantly reduces ambiguity noise
-  passed into intent_parser + scraper, improving pipeline accuracy.
-- Can be extended with a lightweight seq2seq rewriter (flan-t5-small)
-  for full paraphrase correction if needed in future.
+Replaces static regex lists and pre-defined dictionaries with:
+1. Neural Text Normalization & Paraphrase Formatting via Flan-T5 Seq2Seq model.
+2. Vector Embedding Cosine Similarity Classification for intent & archetype mapping.
+3. Dynamic Character Sequence Alignment for transparent correction tracking.
 """
 
 import re
 import difflib
 import logging
-from typing import Optional
+from typing import Optional, List, Tuple, Dict, Any
+import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
-
-# ── Correction Lexicon ────────────────────────────────────────────────────────
-# Comprehensive general English + shopping-domain vocabulary for fuzzy matching
-CORRECTION_LEXICON = {
-    # Activities / Scenarios
-    "hiking", "trekking", "camping", "skiing", "snowboarding", "surfing", "swimming",
-    "cycling", "running", "jogging", "yoga", "meditation", "gaming", "streaming",
-    "cooking", "baking", "gardening", "painting", "photography", "fishing", "hunting",
-    "traveling", "backpacking", "road trip", "vacation", "festival", "concert",
-    "wedding", "party", "birthday", "office", "studying", "reading", "journaling",
-    "workout", "gym", "pilates", "crossfit", "boxing", "dance", "marathon",
-
-    # Tech & Electronics
-    "laptop", "headphones", "earphones", "earbuds", "keyboard", "mouse", "monitor",
-    "tablet", "charger", "cable", "router", "speaker", "camera", "drone",
-    "smartwatch", "projector", "microphone", "webcam", "storage", "battery",
-    "graphics", "processor", "motherboard", "memory", "cooling", "gaming",
-
-    # Home & Lifestyle
-    "furniture", "mattress", "pillow", "blanket", "kitchen", "cooking", "appliance",
-    "vacuum", "blender", "toaster", "coffee", "refrigerator", "microwave",
-    "curtains", "lighting", "decoration", "cleaning", "organizer", "storage",
-
-    # Fashion & Sports
-    "shoes", "sneakers", "boots", "sandals", "jacket", "hoodie", "shirt",
-    "pants", "jeans", "dress", "socks", "gloves", "helmet", "goggles",
-    "backpack", "bag", "wallet", "sunglasses", "watch", "jewelry",
-
-    # Common misspelling targets
-    "necessary", "essential", "equipment", "accessories", "supplies", "gear",
-    "professional", "budget", "affordable", "premium", "wireless", "portable",
-    "waterproof", "lightweight", "durable", "comfortable", "stylish",
-    "beginner", "advanced", "outdoor", "indoor", "travel", "everyday",
-    "recommend", "suggest", "find", "help", "want", "need", "looking",
-    "something", "anything", "everything", "everything", "nothing",
-
-    # Brands (common typo targets)
-    "apple", "samsung", "sony", "google", "microsoft", "amazon", "nike",
-    "adidas", "logitech", "bose", "jbl", "philips", "corsair", "razer",
-}
-
-# ── Scenario Signals → Formatted Intent Template ──────────────────────────────
-SCENARIO_TEMPLATES = [
-    # (trigger_patterns, formatted_template)
-    (
-        [r'\bski(ing)?\b', r'\bsnowboard(ing)?\b', r'\bski\s+trip\b'],
-        "I want to go for a skiing / snowboarding trip, help me shop for all the necessary gear and clothing."
-    ),
-    (
-        [r'\bhik(e|ing)\b', r'\btrek(king)?\b'],
-        "I am planning a hiking / trekking trip. Help me find all the essential gear, clothing, and accessories."
-    ),
-    (
-        [r'\bcamping\b'],
-        "I want to go camping. Help me shop for essential camping gear including shelter, cooking, and safety items."
-    ),
-    (
-        [r'\bhome\s+office\b', r'\bwork\s+from\s+home\b', r'\bwfh\b'],
-        "I am setting up a home office. Help me find all the essential equipment: desk, chair, monitors, peripherals."
-    ),
-    (
-        [r'\bhome\s+gym\b', r'\bgym\s+setup\b'],
-        "I want to set up a home gym. Help me find all the essential workout equipment and accessories."
-    ),
-    (
-        [r'\bbeach\b.*\bvacation\b', r'\bbeach\s+trip\b'],
-        "I am going on a beach vacation. Help me shop for all the necessary items: swimwear, sunscreen, gear, and accessories."
-    ),
-    (
-        [r'\bwedding\b'],
-        "I am shopping for a wedding. Help me find all the essential items for the event."
-    ),
-    (
-        [r'\bbaby\b.*\b(shower|room|nursery|essentials)\b'],
-        "I am preparing for a new baby. Help me shop for all the essential baby items and accessories."
-    ),
-    (
-        [r'\bgaming\s+setup\b', r'\bpc\s+build\b', r'\bgaming\s+room\b'],
-        "I am building a gaming setup / PC. Help me find all the essential components and peripherals."
-    ),
-    (
-        [r'\b(road\s+trip|travel|traveling|backpacking)\b'],
-        "I am going on a trip / traveling. Help me shop for all the necessary travel gear and accessories."
-    ),
-    (
-        [r'\b(yoga|pilates|meditation)\b'],
-        "I want to start yoga / pilates / meditation. Help me find all the essential equipment and accessories."
-    ),
-    (
-        [r'\b(photography|photographer)\b'],
-        "I am getting into photography. Help me find the best cameras, lenses, and accessories."
-    ),
-    (
-        [r'\b(cycling|biking|bicycle)\b'],
-        "I want to go cycling. Help me find the best bikes, helmets, and cycling accessories."
-    ),
-    (
-        [r'\b(marathon|running|jogging)\b'],
-        "I am training for a marathon / running. Help me find the best running shoes, gear, and accessories."
-    ),
-    (
-        [r'\b(cooking|baking|kitchen)\b.*\b(setup|tools|equipment|accessories)\b'],
-        "I want to set up a cooking / baking kitchen. Help me find the best kitchen tools and equipment."
-    ),
-    (
-        [r'\b(surfing|surf)\b'],
-        "I want to go surfing. Help me find surfboards, wetsuits, and essential surfing accessories."
-    ),
-    (
-        [r'\b(rock\s+climbing|bouldering|climbing)\b'],
-        "I want to go rock climbing / bouldering. Help me find harnesses, shoes, chalk, and climbing accessories."
-    ),
-]
-
-# ── Common Spelling Patterns for Non-Vocabulary Words ─────────────────────────
-MANUAL_CORRECTIONS = {
-    # Common misspellings
-    "wanna": "want to",
-    "gonna": "going to",
-    "gotta": "need to",
-    "plz": "please",
-    "pls": "please",
-    "lmk": "let me know",
-    "asap": "as soon as possible",
-    "w/": "with",
-    "w/o": "without",
-    "bc": "because",
-    "b/c": "because",
-    "tbh": "to be honest",
-    "idk": "I don't know",
-    "idc": "I don't care",
-    "imo": "in my opinion",
-    "ngl": "not gonna lie",
-    "smth": "something",
-    "sth": "something",
-    "nd": "and",
-    "n": "and",
-    "r": "are",
-    "ur": "your",
-    "u": "you",
-    "hv": "have",
-    "hav": "have",
-    "thx": "thanks",
-    "ty": "thank you",
-    "btw": "by the way",
-    "fyi": "for your information",
-    "irl": "in real life",
-    "imo": "in my opinion",
-    "lol": "",  # remove
-    "lmao": "",  # remove
-    "omg": "",  # remove
-    "omfg": "",  # remove
+# Core Archetype Vectors for Cosine Similarity Matching
+ARCHETYPE_DESCRIPTIONS = {
+    "SCENARIO_TRIP": "outdoor activity adventure trip travel sports skiing hiking camping beach vacation",
+    "SCENARIO_SETUP": "tech build workstation gaming PC office setup home gym room setup computer",
+    "SCENARIO_HOME": "home furniture kitchen appliances interior decoration living space cleaning lifestyle",
+    "SCENARIO_FASHION": "fashion apparel footwear clothing outfit accessories dress shoes jacket style",
+    "PRODUCT_DIRECT": "specific single electronic product device gadget item purchase brand name"
 }
 
 
-class QueryClarifier:
+class NeuralQueryClarifier:
     """
-    Lightweight query understanding and reformulation engine.
-    
-    Pipeline:
-    1. apply_manual_corrections() → fix slang/abbreviations
-    2. correct_spelling() → difflib fuzzy match against CORRECTION_LEXICON
-    3. detect_scenario_template() → map to structured intent if recognizable
-    4. format_clarified_prompt() → produce clean, formatted output
-
-    Returns a ClarificationResult with:
-    - corrected_input: spell-corrected version of raw input
-    - understood_as: a human-readable summary of what was understood
-    - formatted_prompt: the clean prompt to pass downstream
-    - confidence: 'high' | 'medium' | 'low'
-    - query_type: 'SCENARIO' | 'PRODUCT' | 'AMBIGUOUS'
-    - changes_made: list of specific corrections/changes for transparency
+    Deep Learning powered query understanding and reformulation engine.
+    Uses vector embedding cosine similarity and neural sequence-to-sequence generation.
     """
 
     def __init__(self):
-        self._scenario_patterns = []
-        for trigger_list, template in SCENARIO_TEMPLATES:
-            compiled = [re.compile(p, re.IGNORECASE) for p in trigger_list]
-            self._scenario_patterns.append((compiled, template))
-        logger.info("QueryClarifier initialized.")
+        self._tokenizer = None
+        self._model = None
+        self._archetype_embeddings = {}
+        self._is_initialized = False
 
-    def clarify(self, raw_input: str) -> dict:
+    def _lazy_init(self):
+        """Lazy load PyTorch transformer model and compute archetype embeddings."""
+        if self._is_initialized:
+            return
+
+        try:
+            from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+            model_name = "google/flan-t5-small"
+            logger.info(f"Loading DL QueryClarifier model: {model_name}...")
+            self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self._model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+            self._model.eval()
+
+            # Pre-compute vector embeddings for archetype descriptions using model encoder
+            with torch.no_grad():
+                for key, desc in ARCHETYPE_DESCRIPTIONS.items():
+                    inputs = self._tokenizer(desc, return_tensors="pt", truncation=True, max_length=64)
+                    encoder_outputs = self._model.encoder(**inputs)
+                    # Mean pooling over hidden states to get 512-dim embedding vector
+                    embedding = encoder_outputs.last_hidden_state.mean(dim=1)
+                    embedding = F.normalize(embedding, p=2, dim=1)
+                    self._archetype_embeddings[key] = embedding
+
+            self._is_initialized = True
+            logger.info("DL QueryClarifier model & archetype vector embeddings loaded successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize DL QueryClarifier model: {e}")
+
+    def _get_embedding(self, text: str) -> Optional[torch.Tensor]:
+        """Compute 512-dim normalized vector embedding for an input string."""
+        if not self._is_initialized or not self._model:
+            return None
+        try:
+            with torch.no_grad():
+                inputs = self._tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
+                encoder_outputs = self._model.encoder(**inputs)
+                embedding = encoder_outputs.last_hidden_state.mean(dim=1)
+                return F.normalize(embedding, p=2, dim=1)
+        except Exception as e:
+            logger.error(f"Embedding extraction error: {e}")
+            return None
+
+    def _compute_cosine_similarities(self, text_embedding: torch.Tensor) -> Dict[str, float]:
+        """Compute Cosine Similarity scores between query embedding and core archetypes."""
+        similarities = {}
+        if text_embedding is None:
+            return similarities
+
+        with torch.no_grad():
+            for key, arch_emb in self._archetype_embeddings.items():
+                # Cosine Similarity = (u · v) / (||u|| ||v||)
+                cos_sim = F.cosine_similarity(text_embedding, arch_emb).item()
+                similarities[key] = max(0.0, cos_sim)
+        return similarities
+
+    def _generate_neural_rewrite(self, raw_input: str) -> str:
+        """Use Flan-T5 Seq2Seq model to fix spelling, normalize slang, and reformat text."""
+        if not self._is_initialized or not self._model:
+            return raw_input
+
+        try:
+            # Neural prompt instruction for end-to-end text correction and presentable formatting
+            prompt = (
+                f"Fix spelling errors, normalize slang, and rewrite into a clear presentable shopping prompt: {raw_input}"
+            )
+            inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True, max_length=128)
+            
+            with torch.no_grad():
+                outputs = self._model.generate(
+                    inputs.input_ids,
+                    max_new_tokens=64,
+                    num_beams=2,
+                    early_stopping=True
+                )
+            decoded = self._tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+
+            if decoded and len(decoded) > 5:
+                decoded = decoded[0].upper() + decoded[1:]
+                return decoded
+        except Exception as e:
+            logger.error(f"Neural text rewrite error: {e}")
+        return raw_input
+
+    def _extract_changes(self, raw: str, rewritten: str) -> List[str]:
+        """Detect modified words between raw input and neural output for user transparency."""
+        raw_words = re.findall(r'\w+', raw.lower())
+        rewritten_words = re.findall(r'\w+', rewritten.lower())
+        changes = []
+
+        if not raw_words or not rewritten_words:
+            return changes
+
+        for rw in raw_words:
+            if len(rw) >= 3 and rw not in rewritten_words:
+                best_match = None
+                best_sim = 0.5
+                for n_w in rewritten_words:
+                    if len(n_w) >= 3:
+                        sim = difflib.SequenceMatcher(None, rw, n_w).ratio()
+                        if sim > best_sim:
+                            best_sim = sim
+                            best_match = n_w
+                if best_match:
+                    changes.append(f'"{rw}" → "{best_match}" (contextual inference)')
+        return changes
+
+    def clarify(self, raw_input: str) -> Dict[str, Any]:
         """
-        Main entry point. Returns a full clarification result.
+        Main entry point called by FastAPI /api/clarify_query.
         """
         if not raw_input or not raw_input.strip():
             return {
@@ -227,26 +163,50 @@ class QueryClarifier:
             }
 
         raw = raw_input.strip()
-        changes_made = []
+        self._lazy_init()
 
-        # Step 1: Manual corrections (slang/abbreviations)
-        corrected = self._apply_manual_corrections(raw, changes_made)
+        # Step 1: Neural Seq2Seq Rewriting & Spelling Normalization
+        neural_rewritten = self._generate_neural_rewrite(raw)
+        changes_made = self._extract_changes(raw, neural_rewritten)
 
-        # Step 2: Spell correction (difflib fuzzy match)
-        corrected = self._correct_spelling(corrected, changes_made)
+        # Step 2: Vector Embedding Extraction
+        query_emb = self._get_embedding(neural_rewritten)
 
-        # Step 3: Scenario template mapping
-        template_match = self._detect_scenario_template(corrected)
+        # Step 3: Cosine Similarity Vector Matching
+        sim_scores = self._compute_cosine_similarities(query_emb)
 
-        # Step 4: Build formatted prompt
-        formatted_prompt, understood_as, confidence, query_type = self._build_formatted_prompt(
-            corrected, raw, template_match, changes_made
-        )
+        # Determine highest scoring archetype via Cosine Similarity
+        best_archetype = "PRODUCT_DIRECT"
+        max_sim = 0.0
+        if sim_scores:
+            best_archetype, max_sim = max(sim_scores.items(), key=lambda x: x[1])
 
-        needs_confirmation = bool(changes_made) or confidence in ("medium", "low") or template_match is not None
+        # Step 4: Map Cosine Similarity & Embedding to Structured Output
+        if max_sim >= 0.65:
+            confidence = "high"
+        elif max_sim >= 0.45:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        is_scenario = "SCENARIO" in best_archetype or len(raw.split()) >= 4 or "want" in raw.lower() or "trip" in raw.lower() or "build" in raw.lower()
+        query_type = "SCENARIO" if is_scenario else "PRODUCT"
+
+        # Format final presentable prompt
+        if query_type == "SCENARIO":
+            if not neural_rewritten.lower().startswith("i "):
+                formatted_prompt = f"{neural_rewritten} Please help me shop for all essential gear, items, and accessories."
+            else:
+                formatted_prompt = neural_rewritten
+            understood_as = f'Shopping scenario: "{raw}" (contextual inference)'
+        else:
+            formatted_prompt = f"Find me the best {neural_rewritten} with good ratings and value for money."
+            understood_as = f'Product search: "{raw}" (contextual inference)'
+
+        needs_confirmation = bool(changes_made) or confidence in ("medium", "low") or query_type == "SCENARIO"
 
         return {
-            "corrected_input": corrected,
+            "corrected_input": neural_rewritten,
             "understood_as": understood_as,
             "formatted_prompt": formatted_prompt,
             "confidence": confidence,
@@ -255,149 +215,6 @@ class QueryClarifier:
             "needs_confirmation": needs_confirmation,
         }
 
-    # ── Step 1 ────────────────────────────────────────────────────────────────
-    def _apply_manual_corrections(self, text: str, changes: list) -> str:
-        words = text.split()
-        result = []
-        for word in words:
-            clean = word.lower().strip(".,!?;:")
-            if clean in MANUAL_CORRECTIONS:
-                replacement = MANUAL_CORRECTIONS[clean]
-                if replacement:
-                    result.append(replacement)
-                    changes.append(f'"{word}" → "{replacement}"')
-                else:
-                    changes.append(f'Removed "{word}" (informal expression)')
-                # skip appending word
-            else:
-                result.append(word)
-        return " ".join(result).strip()
 
-    # ── Step 2 ────────────────────────────────────────────────────────────────
-    def _correct_spelling(self, text: str, changes: list) -> str:
-        words = text.split()
-        result = []
-        for idx, word in enumerate(words):
-            clean = re.sub(r"[^a-zA-Z]", "", word.lower())
-            
-            # If word is unknown
-            if len(clean) > 3 and clean not in CORRECTION_LEXICON:
-                # 1. Try static difflib against known lexicon
-                close = difflib.get_close_matches(clean, CORRECTION_LEXICON, n=1, cutoff=0.82)
-                if close and close[0] != clean:
-                    changes.append(f'"{word}" → "{close[0]}" (spelling)')
-                    result.append(close[0])
-                    continue
-                
-                # 2. Contextual LLM recovery for totally unknown words (e.g. "biach" -> "beach")
-                try:
-                    from ml_engine.models.intent_parser import intent_parser
-                    tk, md = intent_parser._get_gen_model()
-                    if tk and md:
-                        # Mask out the unknown word and ask T5 what makes semantic sense
-                        masked_words = words.copy()
-                        masked_words[idx] = "<extra_id_0>"
-                        masked_text = " ".join(masked_words)
-                        
-                        inputs = tk(masked_text, return_tensors="pt").input_ids
-                        outputs = md.generate(inputs, max_new_tokens=20)
-                        prediction = tk.decode(outputs[0], skip_special_tokens=True).strip()
-                        
-                        # Scan LLM prediction for a word phonetically/visually similar to the typo
-                        pred_words = re.findall(r'[a-zA-Z]+', prediction.lower())
-                        best_match = None
-                        best_sim = 0.5  # Need at least 50% character similarity to apply context correction
-                        
-                        for pw in pred_words:
-                            if len(pw) > 2:
-                                sim = difflib.SequenceMatcher(None, clean, pw).ratio()
-                                if sim > best_sim:
-                                    best_sim = sim
-                                    best_match = pw
-                                    
-                        if best_match:
-                            changes.append(f'"{word}" → "{best_match}" (contextual inference)')
-                            result.append(best_match)
-                            continue
-                except Exception as e:
-                    logger.warning(f"Contextual correction failed: {e}")
-
-            result.append(word)
-        return " ".join(result)
-
-    # ── Step 3 ────────────────────────────────────────────────────────────────
-    def _detect_scenario_template(self, text: str) -> Optional[str]:
-        for patterns, template in self._scenario_patterns:
-            if any(p.search(text) for p in patterns):
-                return template
-        return None
-
-    # ── Step 4 ────────────────────────────────────────────────────────────────
-    def _build_formatted_prompt(
-        self, corrected: str, raw: str, template: Optional[str], changes: list
-    ) -> tuple[str, str, str, str]:
-        """
-        Returns: (formatted_prompt, understood_as, confidence, query_type)
-        """
-        # Case A: Matched a well-known scenario template → high confidence 
-        if template:
-            return (
-                template,
-                f'Shopping scenario: "{corrected}"',
-                "high",
-                "SCENARIO",
-            )
-
-        # Case B: Looks like a specific product query
-        #   Heuristic: short (≤6 words), contains brand/product keyword, no action verbs
-        words = corrected.lower().split()
-        has_action = any(w in {"want", "need", "help", "going", "planning", "setting"} for w in words)
-        is_short = len(words) <= 6
-        has_product_word = any(w in CORRECTION_LEXICON for w in words)
-
-        if is_short and not has_action and has_product_word:
-            formatted = f"Find me the best {corrected} available in India with good reviews and value for money."
-            return (
-                formatted,
-                f'Product search: "{corrected}"',
-                "high" if not changes else "medium",
-                "PRODUCT",
-            )
-
-        # Case C: Multi-word action sentence — treat as scenario
-        if has_action and len(words) >= 4:
-            # Standardize punctuation + capitalize
-            clean = corrected.strip()
-            if not clean.endswith("."):
-                clean += "."
-            # Ensure first letter capitalized
-            clean = clean[0].upper() + clean[1:]
-            formatted = (
-                f"{clean} Please help me build a complete shopping list with all the "
-                f"essential products, gear, and accessories needed."
-            )
-            return (
-                formatted,
-                f'Shopping scenario: "{corrected}"',
-                "medium" if changes else "high",
-                "SCENARIO",
-            )
-
-        # Case D: Ambiguous / unclear → low confidence
-        clean = corrected.strip()
-        if not clean.endswith("?") and not clean.endswith("."):
-            clean += "."
-        formatted = (
-            f"Help me shop for: {clean} "
-            f"Find the most relevant products with good ratings and value for money."
-        )
-        return (
-            formatted,
-            f'Shopping for: "{corrected}" (interpreted broadly)',
-            "low",
-            "AMBIGUOUS",
-        )
-
-
-# Singleton
-query_clarifier = QueryClarifier()
+# Singleton Instance
+query_clarifier = NeuralQueryClarifier()
