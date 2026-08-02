@@ -130,7 +130,7 @@ _AMAZON_JS = """() => {
             rating: ratingEl ? (ratingEl.textContent || ratingEl.innerText || '').trim() : '',
             isBest: !!(badgeEl && (badgeEl.innerText || '').toLowerCase().includes('best'))
         });
-        if (candidates.length >= 15) break;
+        if (candidates.length >= 40) break;
     }
     return { count: cards.length, results: candidates };
 }"""
@@ -467,11 +467,10 @@ class ScraperService:
             if model_num not in title_l:
                 return False
 
-        # Noun overlap (at least one 4+ char query word in title)
-        query_words = [w for w in re.split(r'\W+', query_l) if len(w) >= 4]
+        # Noun overlap (at least one 3+ char query word in title substring)
+        query_words = [w for w in re.split(r'\W+', query_l) if len(w) >= 3]
         if query_words:
-            title_words = set(re.split(r'\W+', title_l))
-            if not any(w in title_words for w in query_words):
+            if not any(w in title_l for w in query_words):
                 return False
 
         return True
