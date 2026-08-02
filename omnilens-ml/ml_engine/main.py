@@ -459,37 +459,48 @@ class RLFeedbackRequest(BaseModel):
 
 @app.post("/api/rl_feedback")
 async def rl_feedback_endpoint(item: RLFeedbackRequest):
-    global _global_weights
-    w: dict[str, float] = dict(_global_weights)
-    
-    # Analyze item to adjust weights dynamically based on RL logic
-    if item.finalPrice > 0 and item.finalPrice < 2000:
-        w["price"] = w.get("price", 0.10) + 0.05
-        w["rating"] = max(0.01, w.get("rating", 0.25) - 0.02)
-    elif item.finalPrice > 10000:
-        w["price"] = max(0.01, w.get("price", 0.10) - 0.05)
-        w["bestseller"] = w.get("bestseller", 0.15) + 0.05
-        
-    if item.sentiment > 80:
-        w["sentiment"] = w.get("sentiment", 0.35) + 0.05
-    elif item.sentiment < 40 and item.sentiment > 0:
-        w["sentiment"] = max(0.01, w.get("sentiment", 0.35) - 0.05)
-        
-    if "Best Seller" in item.tags or "Most Monthly Sales" in item.tags:
-        w["sales"] = w.get("sales", 0.15) + 0.05
-        
-    if "Most Reliable" in item.tags:
-        w["rating"] = w.get("rating", 0.25) + 0.05
+    """
+    Implicit RLHF endpoint — called when a user clicks/interacts with a product card.
+    Translates user behavior signals into LTR RLHF bias adjustments.
+    """
+    imps = scoring_engine.get_feature_importances()["effective"]
+    slider_map = {
+        "price":      imps.get("discount", 0.1),
+        "rating":     imps.get("rating", 0.2),
+        "sentiment":  imps.get("sentiment", 0.2),
+        "bestseller": imps.get("brand_trust", 0.1),
+        "sales":      imps.get("sales_volume", 0.1),
+    }
 
-    # Normalize weights
-    total = float(sum(w.values()))
-    if total > 0.0:
-        _global_weights = {k: round(float(v) / total, 3) for k, v in w.items()}
-    
-    scoring_engine.update_weights(_global_weights)
-    logger.info(f"RL Updated Weights after interaction with {item.name}: {_global_weights}")
-    
-    return {"message": "RL Feedback Processed", "weights": _global_weights}
+    # User clicked a cheap item → boost price/discount signal
+    if item.finalPrice > 0 and item.finalPrice < 2000:
+        slider_map["price"] = min(1.0, slider_map["price"] + 0.05)
+        slider_map["rating"] = max(0.01, slider_map["rating"] - 0.02)
+    # User clicked a premium item → boost brand trust
+    elif item.finalPrice > 10000:
+        slider_map["price"] = max(0.01, slider_map["price"] - 0.05)
+        slider_map["bestseller"] = min(1.0, slider_map["bestseller"] + 0.05)
+
+    # High sentiment item engaged → boost sentiment weight
+    if item.sentiment > 80:
+        slider_map["sentiment"] = min(1.0, slider_map["sentiment"] + 0.05)
+    elif 0 < item.sentiment < 40:
+        slider_map["sentiment"] = max(0.01, slider_map["sentiment"] - 0.05)
+
+    # Bestseller tag interaction → boost sales signal
+    if "Best Seller" in item.tags or "Most Monthly Sales" in item.tags:
+        slider_map["sales"] = min(1.0, slider_map["sales"] + 0.05)
+
+    # Reliable item engaged → boost rating signal
+    if "Most Reliable" in item.tags:
+        slider_map["rating"] = min(1.0, slider_map["rating"] + 0.05)
+
+    total = sum(slider_map.values())
+    normalized = {k: round(v / total, 4) for k, v in slider_map.items()} if total > 0 else slider_map
+    scoring_engine.update_weights(normalized)
+    importances = scoring_engine.get_feature_importances()
+    logger.info(f"[LTR] RL feedback from interaction with '{item.name}' → bias updated")
+    return {"message": "RL Feedback Processed", "importances": importances}
 
 class WishlistRequest(BaseModel):
     wishlist: list[dict]
@@ -519,7 +530,7 @@ async def wishlist_suggestions_endpoint(req: WishlistRequest):
                         continue
                     seen_links.add(link)
                 
-                sd = scoring_engine.calculate_raw_score(scraped, node["essentiality"])
+                sd = scoring_engine.calculate_raw_score(scraped, node["essentiality"], query=w_name)
                 unique_id = f"wish_{abs(hash(link)) % 100000}_{random.randint(1000, 99999)}"
                 scored.append({
                     "id": unique_id,
@@ -595,44 +606,50 @@ def _parse_add_item(msg: str) -> str | None:
     return None
 
 def _apply_weight_nlp(msg: str) -> dict | None:
-    """Apply NLP rules to adjust weights. Returns updated weights or None if no match."""
-    global _global_weights
+    """
+    Apply NLP rules to chat messages to adjust LTR RLHF bias.
+    Returns updated slider weights or None if no preference match.
+    """
     fb = msg.lower()
-    w = dict(_global_weights)
+    imps = scoring_engine.get_feature_importances()["effective"]
+    w = {
+        "price":      imps.get("discount", 0.1),
+        "rating":     imps.get("rating", 0.2),
+        "sentiment":  imps.get("sentiment", 0.2),
+        "bestseller": imps.get("brand_trust", 0.1),
+        "sales":      imps.get("sales_volume", 0.1),
+    }
     changed = False
 
     rules = [
-        (["don't care about price", "price doesn't matter", "ignore price", "no budget", "unlimited budget",
-          "cost doesn't matter", "forget the cost", "price is not important"],
+        (["don't care about price", "price doesn't matter", "ignore price", "no budget",
+          "unlimited budget", "cost doesn't matter", "price is not important"],
          {"price": -0.10, "rating": +0.05, "sentiment": +0.05}),
-        (["best rated", "highest rating", "top rated", "quality matters", "focus on quality", "rating is important"],
+        (["best rated", "highest rating", "top rated", "quality matters", "focus on quality"],
          {"rating": +0.10, "price": -0.05, "sales": -0.05}),
-        (["cheapest", "budget friendly", "affordable", "low price", "cheap as possible", "save money", "cost effective"],
+        (["cheapest", "budget friendly", "affordable", "low price", "cheap as possible", "save money"],
          {"price": +0.12, "rating": -0.06, "sentiment": -0.06}),
         (["bestseller", "popular", "best seller", "trending", "most popular"],
          {"bestseller": +0.10, "sales": +0.05, "price": -0.05, "sentiment": -0.10}),
-        (["reviews", "customer feedback", "sentiment", "people say", "review score", "most reviewed"],
+        (["reviews", "customer feedback", "sentiment", "people say", "most reviewed"],
          {"sentiment": +0.10, "sales": -0.05, "price": -0.05}),
-        (["sales", "monthly sales", "most sold", "top selling", "high sales", "selling fast"],
+        (["sales", "monthly sales", "most sold", "top selling", "high sales"],
          {"sales": +0.10, "sentiment": -0.05, "price": -0.05}),
     ]
 
     for triggers, deltas in rules:
         if any(t in fb for t in triggers):
             for key, delta in deltas.items():
-                w[key] = max(0.0, w.get(key, 0) + delta)
+                w[key] = max(0.0, min(1.0, w.get(key, 0) + delta))
             changed = True
 
     if not changed:
         return None
 
     total = sum(w.values())
-    if total > 0:
-        w = {k: round(v / total, 3) for k, v in w.items()}
-
-    _global_weights = w
-    scoring_engine.update_weights(_global_weights)
-    return w
+    normalized = {k: round(v / total, 4) for k, v in w.items()} if total > 0 else w
+    scoring_engine.update_weights(normalized)
+    return normalized
 
 _REMOVE_TRIGGERS = ["remove", "already have", "i have", "don't need", "skip", "exclude", "take out", "delete", "drop"]
 _REPLACE_TRIGGERS = ["replace", "swap", "instead", "substitute", "change to"]
@@ -689,7 +706,7 @@ async def chat_endpoint(req: ChatRequest):
             if scraped:
                 scored = []
                 for data in scraped[:count]:
-                    sd = scoring_engine.calculate_raw_score(data, 1.0)
+                    sd = scoring_engine.calculate_raw_score(data, 1.0, query=subject)
                     scored.append({
                         "id": f"rank_{abs(hash(data['link'])) % 100000}",
                         "name": data["title"],
@@ -763,7 +780,7 @@ async def chat_endpoint(req: ChatRequest):
                 scraped = await scraper_service.scrape_item(node["name"], context=context)
                 # Accept any result — price=0 is OK (displayed as "Price N/A" in UI)
                 if scraped:
-                    sd = scoring_engine.calculate_raw_score(scraped, node["essentiality"])
+                    sd = scoring_engine.calculate_raw_score(scraped, node["essentiality"], query=query_context)
                     scored.append({
                         "id": f"gen_{abs(hash(scraped.get('link', node['name']))) % 100000}",
                         "name": scraped.get("title", node["name"]),
@@ -822,7 +839,7 @@ async def chat_endpoint(req: ChatRequest):
         if not scrape_result:
             return {"action": "message", "message": f"⚠️ Couldn't scrape **{new_item_name}**."}
 
-        score_data = scoring_engine.calculate_raw_score(scrape_result, 0.8)
+        score_data = scoring_engine.calculate_raw_score(scrape_result, 0.8, query=new_item_name)
         new_item = {
             "id": f"chat_{abs(hash(new_item_name)) % 90000}",
             "name": new_item_name,
@@ -850,7 +867,7 @@ async def chat_endpoint(req: ChatRequest):
         if not scrape_result:
             return {"action": "message", "message": f"⚠️ Couldn't find **{new_item_name}**."}
 
-        score_data = scoring_engine.calculate_raw_score(scrape_result, 0.7)
+        score_data = scoring_engine.calculate_raw_score(scrape_result, 0.7, query=new_item_name)
         new_item = {
             "id": f"chat_{abs(hash(new_item_name)) % 90000}",
             "name": new_item_name,
@@ -1059,7 +1076,8 @@ async def explore_further(req: ExploreRequest):
                 if product_id in seen_ids_set:
                     continue
 
-                sd = scoring_engine.calculate_raw_score(scraped, float(node.get("essentiality", 0.7)))
+                # Pass original explore query so LTR can compute BGE semantic similarity
+                sd = scoring_engine.calculate_raw_score(scraped, float(node.get("essentiality", 0.7)), query=query)
 
                 scored.append({
                     "id":              product_id,
@@ -1074,7 +1092,6 @@ async def explore_further(req: ExploreRequest):
                     "finalPrice":      sd.get("price_inr", 0),
                     "sentiment":       round(sd.get("sentiment", 0.0), 1),
                     "reliability":     round(sd.get("reliability_score", 0.6), 2),
-                    "brand_score":     round(sd.get("brand_score", 0.5) * 100, 1),
                     "discount_pct":    round(sd.get("discount_pct", 0.0), 1),
                     "sales_volume":    sd.get("sales_volume", 0),
                     "wait_to_buy":     sd.get("wait_to_buy", False),
