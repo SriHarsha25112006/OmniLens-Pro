@@ -107,9 +107,11 @@ _AMAZON_JS = """() => {
     };
 
     const candidates = [];
+    const seenAsins = new Set();
     for (const card of cards) {
         const asin = card.getAttribute('data-asin') || '';
-        if (!asin) continue;
+        if (!asin || seenAsins.has(asin)) continue;
+        seenAsins.add(asin);
 
         const title = getVal(card, TITLE_SELS);
         if (!title || title.length < 3) continue;
@@ -278,11 +280,13 @@ class ScraperService:
 
             candidates = data.get("results", [])
             final_items = []
+            seen_titles = set()
 
             for cand in candidates:
                 title = cand.get("title", "")
-                if not title:
+                if not title or title.lower() in seen_titles:
                     continue
+                seen_titles.add(title.lower())
 
                 link = self._clean_amz_url(cand.get("link", "") or url)
                 if link in exclude_links:
@@ -406,10 +410,12 @@ class ScraperService:
             }""")
 
             final = []
+            seen_titles = set()
             for item in (results or []):
                 title = item.get("title", "").strip()
-                if not title or not self._is_relevant(title, item_name):
+                if not title or title.lower() in seen_titles or not self._is_relevant(title, item_name):
                     continue
+                seen_titles.add(title.lower())
                 img = item.get("img", "").strip()
                 if not img or len(img) < 10:
                     img = self._picsum(title)
