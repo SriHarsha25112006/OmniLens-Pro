@@ -27,7 +27,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.async_api import async_playwright
 from ml_engine.models.intent_parser import intent_parser
-from ml_engine.models.query_clarifier import query_clarifier
 from ml_engine.services.scraper import scraper_service
 from ml_engine.services.evaluator import scoring_engine
 from ml_engine.services.session_manager import session_manager
@@ -71,7 +70,7 @@ async def clarify_query(req: ClarifyRequest):
       needs_confirmation: bool    # Whether to show the confirmation dialog
     }
     """
-    result = query_clarifier.clarify(req.raw_input)
+    result = intent_parser.clarify(req.raw_input)
     logger.info(
         f"[QueryClarifier] '{req.raw_input[:60]}' → "
         f"confidence={result['confidence']} | type={result['query_type']} | "
