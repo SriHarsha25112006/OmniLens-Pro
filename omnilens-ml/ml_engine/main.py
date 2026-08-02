@@ -78,10 +78,11 @@ async def clarify_query(req: ClarifyRequest):
     )
     return result
 
-async def process_item(item: dict, browser, log_q: asyncio.Queue) -> list[dict]:
+async def process_item(item: dict, browser, log_q: asyncio.Queue, original_query: str = "") -> list[dict]:
     """
     Processes a single search term into multiple product nodes.
     Each item gets its own fresh browser context to avoid Amazon session bans.
+    original_query is the user's raw prompt — passed to LTR for semantic similarity scoring.
     """
     item_id = item['id']
     item_name = item['name']
@@ -129,14 +130,15 @@ async def process_item(item: dict, browser, log_q: asyncio.Queue) -> list[dict]:
         await log_q.put(f"data: {json.dumps({'event': 'item_update', 'data': {'id': item_id, 'status': 'complete', 'statusText': 'Scraper Fallback Executed', 'progress': 100}})}\n\n")
 
     processed = []
-    # Limit to 8 products per search term to avoid UI overload
-    for i, data in enumerate(scraped_results[:8]):
+    # Limit to 10 products per search term to avoid UI overload
+    for i, data in enumerate(scraped_results[:10]):
         unique_id = f"{item_id}_{i}"
         score_title = data["title"][:20]
         _ev = json.dumps({'event': 'item_update', 'data': {'id': unique_id, 'status': 'analyzing', 'statusText': f'Scoring {score_title}...', 'progress': 50 + (i * 5)}})
         await log_q.put(f"data: {_ev}\n\n")
         
-        score_data = scoring_engine.calculate_raw_score(data, float(item['essentiality']))
+        # Pass original user query so LTR can compute BGE semantic similarity
+        score_data = scoring_engine.calculate_raw_score(data, float(item['essentiality']), query=original_query)
         
         processed.append({
             'id':           unique_id,
@@ -226,7 +228,7 @@ async def stream_shop(req: ShopRequest):
                     all_results = []
                     for item in items_to_scrape:
                         try:
-                            result = await process_item(item, browser, log_q)
+                            result = await process_item(item, browser, log_q, original_query=req.prompt)
                             all_results.append(result)
                         except Exception as e:
                             logger.error(f"process_item failed for '{item.get('name')}': {e}")
@@ -379,15 +381,6 @@ async def stream_shop(req: ShopRequest):
             
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
-# In-memory weight store (per server session)
-_global_weights = {
-    "price": 0.10,
-    "rating": 0.25,
-    "sentiment": 0.35,
-    "bestseller": 0.15,
-    "sales": 0.15,
-}
-
 class TuneRequest(BaseModel):
     feedback: str = ""
     weights: dict = {}
@@ -395,65 +388,60 @@ class TuneRequest(BaseModel):
 @app.post("/api/tune_weights")
 async def tune_weights(req: TuneRequest):
     """
-    RLHF endpoint. Accepts:
-    - Natural language feedback string (parsed by simple NLP rules)
-    - Explicit weights dict from the Review UI sliders
-    Returns the updated weights.
+    RLHF endpoint — persists slider adjustments as additive bias deltas into rlhf_bias.json.
+    The LTR model weights themselves are NEVER modified by this endpoint.
     """
-    global _global_weights
-
     if req.weights:
-        # Direct slider update - just save it
-        _global_weights.update(req.weights)
-        # Normalize to sum=1
-        total = sum(_global_weights.values())
-        if total > 0:
-            _global_weights = {k: round(v / total, 3) for k, v in _global_weights.items()}
-        # Update the scoring engine's live weights
-        scoring_engine.update_weights(_global_weights)
-        return {"weights": _global_weights, "message": "Weights updated."}
+        # Normalize slider values to [0,1] range before sending to LTR engine
+        total = sum(req.weights.values())
+        normalized = {k: round(float(v) / total, 4) for k, v in req.weights.items()} if total > 0 else req.weights
+        scoring_engine.update_weights(normalized)
+        importances = scoring_engine.get_feature_importances()
+        return {"importances": importances, "message": "RLHF bias updated and persisted."}
 
     if req.feedback:
         fb = req.feedback.lower()
-        w: dict[str, float] = dict(_global_weights)
+        # Fetch current effective weights as base
+        imps = scoring_engine.get_feature_importances()["effective"]
+        # Map feedback intent to slider keys
+        slider_map = {"price": imps.get("discount", 0.1), "rating": imps.get("rating", 0.2),
+                      "sentiment": imps.get("sentiment", 0.2), "bestseller": imps.get("brand_trust", 0.1),
+                      "sales": imps.get("sales_volume", 0.1)}
+        if any(x in fb for x in ["price doesn't matter", "ignore price", "no budget"]):
+            slider_map["price"] = max(0.0, slider_map["price"] - 0.08)
+            slider_map["rating"] = min(1.0, slider_map["rating"] + 0.04)
+        if any(x in fb for x in ["best rated", "top rated", "quality"]):
+            slider_map["rating"] = min(1.0, slider_map["rating"] + 0.08)
+        if any(x in fb for x in ["cheapest", "budget", "affordable", "cheap"]):
+            slider_map["price"] = min(1.0, slider_map["price"] + 0.10)
+        if any(x in fb for x in ["bestseller", "popular", "trending"]):
+            slider_map["bestseller"] = min(1.0, slider_map["bestseller"] + 0.08)
+        if any(x in fb for x in ["reviews", "sentiment", "customer feedback"]):
+            slider_map["sentiment"] = min(1.0, slider_map["sentiment"] + 0.08)
+        total = sum(slider_map.values())
+        normalized = {k: round(v / total, 4) for k, v in slider_map.items()} if total > 0 else slider_map
+        scoring_engine.update_weights(normalized)
+        importances = scoring_engine.get_feature_importances()
+        return {"importances": importances, "message": "Feedback applied. RLHF bias updated."}
 
-        # Simple NLP rules for RLHF intent
-        if any(x in fb for x in ["don't care about price", "no budget limit", "price doesn't matter", "ignore price"]):
-            w["price"] = max(0.0, w["price"] - 0.08)
-            w["rating"] += 0.04
-            w["sentiment"] += 0.04
-        if any(x in fb for x in ["best rated", "highest rating", "top rated", "quality"]):
-            w["rating"] += 0.08
-            w["price"] = max(0.0, w["price"] - 0.04)
-            w["sales"] = max(0.0, w["sales"] - 0.04)
-        if any(x in fb for x in ["cheapest", "budget", "affordable", "low price", "cheap"]):
-            w["price"] += 0.10
-            w["rating"] = max(0.0, w["rating"] - 0.05)
-            w["sentiment"] = max(0.0, w["sentiment"] - 0.05)
-        if any(x in fb for x in ["bestseller", "popular", "best seller", "trending"]):
-            w["bestseller"] += 0.08
-            w["sales"] += 0.05
-            w["price"] = max(0.0, w["price"] - 0.05)
-            w["sentiment"] = max(0.0, w["sentiment"] - 0.08)
-        if any(x in fb for x in ["reviews", "review", "sentiment", "customer feedback"]):
-            w["sentiment"] += 0.08
-            w["sales"] = max(0.0, w["sales"] - 0.04)
-            w["price"] = max(0.0, w["price"] - 0.04)
+    return {"importances": scoring_engine.get_feature_importances(), "message": "No changes."}
 
-        # Normalize
-        total = float(sum(w.values()))
-        if total > 0.0:
-            w = {k: round(float(v) / total, 3) for k, v in w.items()}
-        
-        _global_weights = w
-        scoring_engine.update_weights(_global_weights)
-        return {"weights": _global_weights, "message": f"Feedback applied. Adjusted weights based on your preference."}
+@app.get("/api/feature_importances")
+async def get_feature_importances():
+    """
+    Returns LTR model feature importances, current RLHF bias, and effective combined weights.
+    Called by the WeightTuner UI on mount to initialize sliders from the trained model.
+    """
+    return scoring_engine.get_feature_importances()
 
-    return {"weights": _global_weights, "message": "No changes."}
-
-@app.get("/api/weights")
-async def get_weights():
-    return {"weights": _global_weights}
+@app.post("/api/restore_weights")
+async def restore_weights():
+    """
+    Resets RLHF bias to zero — restoring pure LTR model importances.
+    Called by the 'Restore Model Weights' button in the frontend.
+    """
+    importances = scoring_engine.restore_model_weights()
+    return {"importances": importances, "message": "RLHF bias cleared. Restored to trained LTR model weights."}
 
 @app.post("/api/clear_session")
 async def clear_session():

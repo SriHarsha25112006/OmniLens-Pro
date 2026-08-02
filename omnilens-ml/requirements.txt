@@ -7,6 +7,7 @@ transformers
 torch
 sentence-transformers
 scikit-learn
+lightgbm
 aiohttp
 beautifulsoup4
 python-multipart
